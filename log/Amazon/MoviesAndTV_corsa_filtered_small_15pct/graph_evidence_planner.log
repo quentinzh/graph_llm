@@ -1,0 +1,16 @@
+/home/panqingwei/codesofpqw/LLMUserBias/qwen
+split_index:1
+lambda_ul:0.05 top_m_evidence:5 ul_candidate_k:20
+ul_start_epoch:1 planner_weight:0.2 feature_bonus:0.2 evidence_bonus:0.1 pop_penalty:0.1 max_consecutive_token_repeat:3
+/home/panqingwei/codesofpqw/LLMUserBias/qwen
+split_index:1
+lambda_ul:0.05 top_m_evidence:5 ul_candidate_k:20
+ul_start_epoch:1 planner_weight:0.2 feature_bonus:0.2 evidence_bonus:0.1 pop_penalty:0.1 max_consecutive_token_repeat:3
+/home/panqingwei/codesofpqw/LLMUserBias/qwen
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:256 max_target_item_tokens:128 max_evidence_prompt_tokens:128 max_generation_prompt_tokens:64 max_graph_nodes:512
+lambda_ul:0.05 top_m_evidence:5 ul_candidate_k:20
+ul_start_epoch:1 evidence_bonus:0.1 max_consecutive_token_repeat:3
+CUDA OOM during training. epoch=0 batch_idx=9 batch_size=8. CUDA memory GiB current allocated/reserved=36.27/38.35, peak allocated/reserved=36.75/38.35

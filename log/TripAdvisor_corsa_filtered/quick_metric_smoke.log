@@ -1,0 +1,39 @@
+eval_group: all | samples: 64 | quick_metric_smoke samples=64 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 13861 | low_tail_demand: n=4619 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=4619 | mean=0.263644 | min=0.166667 | max=1.000000
+BLEU-1 100.0000
+BLEU-4 100.0000
+USR  1.0000 | USN      64
+Distinct-1  0.9402
+Distinct-2  0.8755
+ENTR  8.8600
+DIV  0.0531
+FCR  1.0000
+FMR  0.9688
+rouge_1 100.0000
+rouge_2 100.0000
+rouge_l 100.0000
+eval_group: low | samples: 35 | quick_metric_smoke samples=64 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 13861 | low_tail_demand: n=4619 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=4619 | mean=0.263644 | min=0.166667 | max=1.000000
+BLEU-1 100.0000
+BLEU-4 100.0000
+USR  1.0000 | USN      35
+Distinct-1  0.9693
+Distinct-2  0.8300
+ENTR  7.6402
+DIV  0.0370
+FCR  1.0000
+FMR  1.0000
+rouge_1 100.0000
+rouge_2 100.0000
+rouge_l 100.0000
+eval_group: high | samples: 9 | quick_metric_smoke samples=64 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 13861 | low_tail_demand: n=4619 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=4619 | mean=0.263644 | min=0.166667 | max=1.000000
+BLEU-1 100.0000
+BLEU-4 100.0000
+USR  1.0000 | USN       9
+Distinct-1  0.9151
+Distinct-2  0.9271
+ENTR  6.8507
+DIV  0.0278
+FCR  0.7778
+FMR  0.7778
+rouge_1 100.0000
+rouge_2 100.0000
+rouge_l 100.0000
