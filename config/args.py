@@ -112,7 +112,7 @@ def snapshot_training_args(args):
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
-        description="Train graph evidence selector + Qwen3-4B LoRA explainer."
+        description="Train profile-conditioned Qwen3-4B LoRA explainer."
     )
     parser.add_argument("--device", "--devices", dest="devices", default="default", type=str)
     parser.add_argument("--embedding_device", default="auto", type=str)
@@ -181,19 +181,17 @@ def build_arg_parser():
     parser.add_argument("--early_stop_patience", default=2, type=int)
     parser.add_argument("--word", default=40, type=int)
     parser.add_argument("--show_train_loss_steps", default=500, type=int)
-    parser.add_argument("--id_hidden", default=1024, type=int)
-    parser.add_argument("--max_profile_tokens", default=256, type=int)
+    parser.add_argument("--max_profile_tokens", default=128, type=int)
     parser.add_argument("--max_target_item_tokens", default=64, type=int)
-    parser.add_argument("--max_evidence_prompt_tokens", default=32, type=int)
-    parser.add_argument("--max_generation_prompt_tokens", default=32, type=int)
+    parser.add_argument("--max_generation_prompt_tokens", default=20, type=int)
     parser.add_argument(
         "--item_description_mode",
         default="keywords",
         choices=["keywords", "full", "none"],
         help="How to include item description: keywords (default), full, or none.",
     )
-    parser.add_argument("--lambda_ul", default=0.05, type=float)
     parser.add_argument("--lambda_feat", default=0.0001, type=float)
+    parser.add_argument("--lambda_ul", default=0.05, type=float)
     parser.add_argument("--top_m_evidence", default=5, type=int)
     parser.add_argument("--ul_candidate_k", default=20, type=int)
     parser.add_argument("--ul_start_epoch", default=1, type=int)
@@ -249,7 +247,7 @@ def build_arg_parser():
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Regenerate all per-dataset artifacts (dataset cache, graph cache, "
+        help="Regenerate per-dataset artifacts (dataset cache, graph cache, "
         "embedding cache, checkpoints, profiles) for the given fold before running. "
         "Implies fresh training; conflicts with --only_eval.",
     )
@@ -306,5 +304,5 @@ def build_arg_parser():
         default=str(PACKAGE_ROOT / "log" / "output"),
         type=str,
     )
-    parser.add_argument("--log_name", default="graph_evidence.log", type=str)
+    parser.add_argument("--log_name", default="graph_profile.log", type=str)
     return parser

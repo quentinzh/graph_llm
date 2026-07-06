@@ -23,26 +23,63 @@ from graph_llm.config.datasets import resolve_dataset_paths
 from graph_llm.dataload.legacy_data import read_split_indices
 from graph_llm.metrics.metrics import DEFAULT_STOP_TOKENS
 
-TOP_PRICE_MARKER = (
-    "Highest-price interacted items, treated as strongest preference signals:"
+BRAND_SPARSE_SUFFIX = (
+    " Brand evidence is sparse, so these should be treated as supporting "
+    "rather than dominant signals."
 )
-PROFILE_HEADER = (
-    "User profile extracted from all items interacted with by this user.\n"
-    "The interacted items are treated as an unordered set; their order does "
-    "not imply interaction order."
-)
+PROFILE_PREFIX = "User interests:"
 TOKEN_RE = re.compile(r"[a-z0-9']+")
 
+# Review/template keywords: keep contractions like "hes"/"wasnt" by using a
+# smaller stop set and dropping generic movie-domain terms.
+MINIMAL_STOP_TOKENS = {
+    "a", "an", "and", "the", "of", "to", "in", "on", "at", "by", "for", "from", "as",
+    "or", "is", "it", "its", "with", "that", "this", "are", "be", "was", "were",
+}
+REVIEW_DOMAIN_STOP_TOKENS = {
+    "movie", "movies", "film", "films", "great", "good", "dvd", "video", "show", "shows",
+}
+REVIEW_STOP_TOKENS = MINIMAL_STOP_TOKENS | REVIEW_DOMAIN_STOP_TOKENS
 
-def _tokenize_text(text, stop_tokens=None):
+# Description keywords keep pronouns but drop generic plot/filler terms seen in
+# Amazon item descriptions. Legacy profiles also only scan the opening text.
+DESCRIPTION_DOMAIN_STOP_TOKENS = {
+    "film", "films", "movie", "movies", "video", "dvd", "show", "shows",
+    "high", "into", "about", "all", "one", "more", "when", "what", "which",
+    "so", "also", "well", "very", "most", "many", "much", "even", "just",
+    "only", "over", "out", "up", "down", "off", "back", "through", "between",
+    "story", "stories", "series", "season", "episode", "episodes",
+    "he", "she", "comedy", "girl", "play", "finds", "after", "along",
+    "than", "their", "has", "michael",
+}
+DESCRIPTION_STOP_TOKENS = (DEFAULT_STOP_TOKENS - {
+    "his", "her", "but", "he", "she", "him", "was", "were", "we", "they", "them",
+    "their", "there", "it's",
+}) | DESCRIPTION_DOMAIN_STOP_TOKENS
+DESCRIPTION_MAX_WORDS = 80
+
+TITLE_STOP_TOKENS = DEFAULT_STOP_TOKENS | {
+    "movie", "movies", "film", "films", "new",
+}
+
+
+def _tokenize_text(text, stop_tokens=None, *, drop_digits: bool = False):
     if stop_tokens is None:
         stop_tokens = DEFAULT_STOP_TOKENS
     text = "" if text is None else str(text).lower()
-    return [tok for tok in TOKEN_RE.findall(text) if tok and tok not in stop_tokens]
+    tokens = []
+    for token in TOKEN_RE.findall(text):
+        if not token or token in stop_tokens:
+            continue
+        if drop_digits and token.isdigit():
+            continue
+        tokens.append(token)
+    return tokens
 
 
 def _count_list(counter: Counter, limit: int = 50):
-    return [{"name": name, "count": count} for name, count in counter.most_common(limit)]
+    ranked = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    return [{"name": name, "count": count} for name, count in ranked[:limit]]
 
 
 def _leaf_category(meta: dict) -> str | None:
@@ -58,6 +95,13 @@ def _leaf_category(meta: dict) -> str | None:
             return str(leaf[-1]).strip() or None
         return str(leaf).strip() or None
     return None
+
+
+def _profile_category(meta: dict) -> str | None:
+    category = _leaf_category(meta)
+    if category in {"TV", "Movies & TV"}:
+        return "Movies"
+    return category
 
 
 def _item_title(meta: dict, raw_item: str) -> str:
@@ -101,56 +145,66 @@ def _join_keywords(items, max_names=8):
     return ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
-def _format_price(value: float) -> str:
-    return f"${value:.2f}"
+def _brand_section(brands: list[dict], brand_coverage: float) -> str:
+    if not brands:
+        return (
+            "Preferred brands/studios: Brand/studio metadata is too sparse to "
+            "identify a reliable brand preference."
+        )
+    if len(brands) == 1:
+        return (
+            "Preferred brands/studios: Brand/studio metadata is sparse, but "
+            f"{brands[0]['name']} appears among the available records."
+        )
+    max_brand_count = max(brand["count"] for brand in brands)
+    if max_brand_count <= 1 and brand_coverage < 0.1:
+        return (
+            "Preferred brands/studios: Brand/studio metadata is sparse, but "
+            f"{_join_names(brands, max_names=3)} appears among the available records."
+        )
+    line = (
+        "Preferred brands/studios: The strongest available brand/studio signals are "
+        f"{_join_names(brands)}."
+    )
+    line += BRAND_SPARSE_SUFFIX
+    return line
 
 
-def _compose_llama_profile(evidence: dict, top_price_items: list) -> str:
+def _category_section(categories: list[dict]) -> str:
+    if not categories:
+        return "Preferred genres/categories: Category metadata is sparse for this user."
+    line = (
+        "Preferred genres/categories: The user shows recurring interest in "
+        f"{_join_names(categories)}."
+    )
+    if len(categories) > 3:
+        line += (
+            " Secondary category signals include "
+            f"{_join_names(categories[3:], max_names=10)}."
+        )
+    return line
+
+
+def _compose_llama_profile(evidence: dict) -> str:
     sections = []
     categories = evidence.get("category_counts", [])
     brands = evidence.get("brand_counts", [])
     desc_kw = evidence.get("description_keyword_counts", [])
     title_kw = evidence.get("title_keyword_counts", [])
     review_kw = evidence.get("review_keyword_counts", [])
-    price_summary = evidence.get("price_summary", {})
     brand_coverage = evidence.get("brand_coverage", 0.0)
 
-    if categories:
-        cat_names = _join_names(categories)
-        sections.append(
-            f"Preferred genres/categories: The user shows recurring interest in {cat_names}."
-        )
-    else:
-        sections.append(
-            "Preferred genres/categories: Category metadata is sparse for this user."
-        )
-
-    if len(brands) >= 2:
-        brand_names = _join_names(brands)
-        sections.append(
-            "Preferred brands/studios: The strongest available brand/studio signals are "
-            f"{brand_names}."
-        )
-    elif len(brands) == 1:
-        sections.append(
-            "Preferred brands/studios: Brand/studio metadata is sparse, but "
-            f"{brands[0]['name']} appears among the available records."
-        )
-    else:
-        sections.append(
-            "Preferred brands/studios: Brand/studio metadata is sparse for this user."
-        )
+    sections.append(_category_section(categories))
+    sections.append(_brand_section(brands, brand_coverage))
 
     theme_parts = []
     if desc_kw:
-        theme_parts.append(
-            "description themes such as " + _join_keywords(desc_kw)
-        )
+        theme_parts.append("description themes such as " + _join_keywords(desc_kw, max_names=8))
     if title_kw:
-        theme_parts.append("title signals such as " + _join_keywords(title_kw))
+        theme_parts.append("title signals such as " + _join_keywords(title_kw, max_names=5))
     if review_kw:
         theme_parts.append(
-            "review/template signals such as " + _join_keywords(review_kw)
+            "review/template signals such as " + _join_keywords(review_kw, max_names=5)
         )
     if theme_parts:
         sections.append(
@@ -163,68 +217,50 @@ def _compose_llama_profile(evidence: dict, top_price_items: list) -> str:
             "Recurring themes: No strong recurring lexical signals are available."
         )
 
-    if price_summary.get("count", 0) > 0:
-        sections.append(
-            "Price preference: Available prices range from "
-            f"{_format_price(price_summary['min'])} to "
-            f"{_format_price(price_summary['max'])}, with a median around "
-            f"{_format_price(price_summary['median'])}."
-        )
-
-    if brand_coverage < 0.2:
-        sections.append(
-            "Less relevant signals: No clearly disliked signals are evident. "
-            "brand/studio metadata provide weaker or less reliable evidence."
-        )
-    else:
-        sections.append(
-            "Less relevant signals: No clearly disliked signals are evident from "
-            "implicit interactions; lower-frequency interests should be treated "
-            "as weaker signals."
-        )
-
     summary_bits = []
     if categories:
         summary_bits.append(_join_names(categories))
     if desc_kw:
-        summary_bits.append(_join_keywords(desc_kw))
-    if brands:
+        summary_bits.append(_join_keywords(desc_kw, max_names=8))
+    if len(brands) >= 2:
         summary_bits.append(_join_names(brands))
     summary_text = "; ".join(bit for bit in summary_bits if bit)
-    if top_price_items:
-        sections.append(
-            "Overall preference summary: Overall, the user appears to prefer "
-            f"{summary_text}. The highest-price interacted items provide "
-            "additional strong preference signals."
-        )
-    else:
-        sections.append(
-            "Overall preference summary: Overall, the user appears to prefer "
-            f"{summary_text or 'the available interaction signals'}."
-        )
+    sections.append(
+        "Overall preference summary: Overall, the user appears to prefer "
+        f"{summary_text or 'the available interaction signals'}."
+    )
     return "\n".join(sections)
 
 
-def _compose_profile_text(
-    num_interactions: int,
-    top_price_items: list,
-    llama_profile: str,
-) -> str:
-    lines = [
-        PROFILE_HEADER,
-        "",
-        f"Number of interacted items used: {num_interactions}.",
-        "",
-    ]
-    if top_price_items:
-        lines.append(TOP_PRICE_MARKER)
-        for idx, item in enumerate(top_price_items, start=1):
-            price = item.get("price")
-            price_text = _format_price(price) if price is not None else "N/A"
-            lines.append(f"{idx}. {item.get('title', item.get('item'))} ({price_text})")
-        lines.append("")
-    lines.append(llama_profile)
-    return "\n".join(lines)
+def _compose_profile_text(llama_profile: str) -> str:
+    return f"{PROFILE_PREFIX}\n{llama_profile}"
+
+
+def _description_keyword_counter(description: str) -> Counter:
+    counter = Counter()
+    seen = set()
+    text = "" if description is None else str(description)
+    if DESCRIPTION_MAX_WORDS > 0:
+        text = " ".join(text.split()[:DESCRIPTION_MAX_WORDS])
+    for token in _tokenize_text(text, DESCRIPTION_STOP_TOKENS):
+        if len(token) < 2:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        counter[token] += 1
+    return counter
+
+
+def _review_text_parts(row: dict) -> list[str]:
+    parts = [str(row.get("predicted") or "")]
+    template = row.get("template")
+    if isinstance(template, (list, tuple)):
+        if len(template) >= 1:
+            parts.append(str(template[0]))
+        if len(template) >= 2:
+            parts.append(str(template[1]))
+    return parts
 
 
 def _aggregate_user_profile(
@@ -248,7 +284,7 @@ def _aggregate_user_profile(
     for row in interactions:
         raw_item = str(row["raw_item"])
         meta = item_meta.get(raw_item, {})
-        category = _leaf_category(meta)
+        category = _profile_category(meta)
         if category:
             category_counter[category] += 1
         brand = meta.get("brand")
@@ -256,12 +292,12 @@ def _aggregate_user_profile(
             brand_counter[str(brand).strip()] += 1
         title = _item_title(meta, raw_item)
         description = meta.get("description") or ""
-        review_text = row.get("review_text") or ""
-        if isinstance(row.get("template"), (list, tuple)) and len(row["template"]) >= 3:
-            review_text = row["template"][2]
-        desc_counter.update(_tokenize_text(description))
-        title_counter.update(_tokenize_text(title))
-        review_counter.update(_tokenize_text(review_text))
+        desc_counter.update(_description_keyword_counter(description))
+        title_counter.update(
+            _tokenize_text(title, TITLE_STOP_TOKENS, drop_digits=True)
+        )
+        for part in _review_text_parts(row):
+            review_counter.update(_tokenize_text(part, REVIEW_STOP_TOKENS))
         rating = row.get("rating")
         if rating is not None:
             rating_counter[str(int(rating))] += 1
@@ -282,7 +318,7 @@ def _aggregate_user_profile(
         price_summary = {
             "count": len(prices),
             "min": float(min(prices)),
-            "median": float(statistics.median(prices)),
+            "median": round(float(statistics.median(prices)), 2),
             "max": float(max(prices)),
         }
     top_price_items = sorted(
@@ -301,8 +337,8 @@ def _aggregate_user_profile(
         "price_summary": price_summary,
         "brand_coverage": round(brand_coverage, 4),
     }
-    llama_profile = _compose_llama_profile(evidence, top_price_items)
-    profile_text = _compose_profile_text(num_interactions, top_price_items, llama_profile)
+    llama_profile = _compose_llama_profile(evidence)
+    profile_text = _compose_profile_text(llama_profile)
     return {
         "profile_mode": "structured",
         "num_interactions": num_interactions,

@@ -8,12 +8,7 @@ from pathlib import Path
 from torch.utils.data import Dataset
 
 
-DEFAULT_EMPTY_PROFILE = (
-    "User profile extracted from all items interacted with by this user.\n"
-    "The interacted items are treated as an unordered set; their order does "
-    "not imply interaction order.\n\n"
-    "No user profile has been extracted yet."
-)
+DEFAULT_EMPTY_PROFILE = "User interests:\nNo profile available yet."
 TOP_PRICE_MARKER = "Highest-price interacted items, treated as strongest preference signals:"
 SPECIAL_TOKEN_IDS = (0, 1, 2)
 

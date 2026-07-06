@@ -1,4 +1,4 @@
-"""Graph-aware dataloader and collate utilities."""
+"""Profile-aware dataloader and collate utilities."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from graph_llm.dataload.legacy_data import (
     tokenizer_special_ids,
 )
 
-from graph_llm.dataload.cache import GraphCacheManager
 from graph_llm.aux.prompt_utils import item_meta_from_row
+from graph_llm.dataload.cache import GraphCacheManager
 from graph_llm.models.token_graph import UserTokenGraph, batch_graphs
 
 
@@ -37,7 +37,7 @@ FEATURE_STOPWORDS = {
 
 
 class GraphDataset(Dataset):
-    """Dataset wrapper that keeps local split index for graph lookup."""
+    """Dataset wrapper with split metadata."""
 
     def __init__(self, dataframe, split_name: str):
         self.df = dataframe.reset_index(drop=False).rename(columns={"index": "row_key"})
@@ -89,6 +89,13 @@ class GraphCollater:
         self.graph_manager = graph_manager
         self.split_name = split_name
 
+    def _graph_for_row(self, row) -> UserTokenGraph:
+        if self.graph_manager is None:
+            return UserTokenGraph.empty()
+        local_idx = int(row["local_idx"])
+        split_name = str(row.get("split_name", self.split_name))
+        return self.graph_manager.get_graph(split_name, local_idx)
+
     def _profile_ids(self, row):
         if self.tokenizer is None:
             return []
@@ -107,13 +114,6 @@ class GraphCollater:
             self.max_target_item_tokens,
             description_mode=self.item_description_mode,
         )
-
-    def _graph_for_row(self, row) -> UserTokenGraph:
-        if self.graph_manager is None:
-            return UserTokenGraph.empty()
-        local_idx = int(row["local_idx"])
-        split_name = str(row.get("split_name", self.split_name))
-        return self.graph_manager.get_graph(split_name, local_idx)
 
     def _keep_feature_token(self, token_id: int) -> bool:
         token_id = int(token_id)
@@ -161,12 +161,13 @@ class GraphCollater:
         return weights
 
     def __call__(self, data):
-        input_ids, userid, itemid, rating = [], [], [], []
+        input_ids, rating = [], []
         profile_ids, target_item_ids = [], []
         feature_weight_rows = []
         graphs = []
         item_texts = []
         item_titles = []
+        raw_users = []
         max_length = max([
             min(self.word, max(len(x["text"]), 1))
             for x in data
@@ -183,14 +184,13 @@ class GraphCollater:
             feature_weight_rows.append(feature_weights + [0.0] * pad_len)
             profile_ids.append(self._profile_ids(x))
             target_item_ids.append(self._target_item_ids(x))
-            userid.append(x["user"])
-            itemid.append(x["item"])
             rating.append(x["rating"])
             graphs.append(self._graph_for_row(x))
             raw_item = str(x["raw_item"]) if "raw_item" in x else str(x["item"])
             title, _description, item_text = item_meta_from_row(raw_item, self.item_meta)
             item_titles.append(title)
             item_texts.append(item_text)
+            raw_users.append(str(x["raw_user"]) if "raw_user" in x else str(x["user"]))
 
         self.cur_step += 1
 
@@ -237,8 +237,6 @@ class GraphCollater:
 
         return (
             torch.tensor(input_ids, dtype=torch.long),
-            torch.tensor(userid, dtype=torch.long),
-            torch.tensor(itemid, dtype=torch.long),
             torch.tensor(rating, dtype=torch.long),
             profile_tensor,
             profile_mask,
@@ -248,9 +246,22 @@ class GraphCollater:
             graphs,
             item_texts,
             item_titles,
+            raw_users,
             feature_position_mask,
             feature_position_weights,
         )
+
+
+def compute_profile_lengths(dataset, profile_records, tokenizer, max_profile_tokens):
+    """Return per-sample profile token lengths for length-bucket sampling."""
+    lengths = []
+    for idx in range(len(dataset)):
+        row = dataset[idx]
+        raw_user = str(row["raw_user"]) if "raw_user" in row else str(row["user"])
+        text = profile_text_from_record(profile_records.get(raw_user))
+        ids = tokenize_profile_text(tokenizer, text, max_profile_tokens)
+        lengths.append(len(ids))
+    return lengths
 
 
 __all__ = [
@@ -259,6 +270,7 @@ __all__ = [
     "GraphCacheManager",
     "MyDataset",
     "assert_profile_coverage",
+    "compute_profile_lengths",
     "dataset_split",
     "load_profile_cache",
     "read_split_indices",

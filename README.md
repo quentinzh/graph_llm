@@ -1,18 +1,14 @@
-# Graph LLM Evidence Selector
+# Graph LLM Profile Explainer
 
-Token-graph explainable recommendation with:
-
-- leakage-safe per-user personalized token graphs
-- neural evidence selector (lightweight GNN + Qwen3-Embedding-0.6B item encoding)
-- Qwen3-4B LoRA SFT with graph-guided unlikelihood loss
+Profile-conditioned explainable recommendation with token-graph selector, graph UL loss, and Qwen3-4B LoRA SFT.
 
 ## Project layout
 
 ```text
 graph_llm/
   main.py              # entry point
-  dataload/            # data loading code
-  models/              # model code
+  dataload/            # data loading, graph cache, embeddings
+  models/              # model, selector, token graph
   train/               # training and inference
   metrics/             # evaluation metrics
   checkpoints/         # saved weights and embedding caches
@@ -25,14 +21,13 @@ graph_llm/
 
 ## Loss
 
-`total_loss = sft_loss + lambda_ul * graph_ul_loss` (default `lambda_ul=0.1`)
+`total_loss = sft_loss + lambda_ul * graph_ul_loss + lambda_feat * feature_loss`
 
-- top-M selector evidence tokens are protected
-- unselected high-frequency user-graph tokens are suppressed via unlikelihood
+- GNN selector picks evidence tokens from per-user token graphs; UL loss suppresses unselected high-frequency tokens
+- Evidence tokens are **not** inserted as prompt text; they guide training via UL loss and `evidence_bonus` at generation
+- `lambda_feat` encourages keyword feature tokens in explanations
 
 ## LLM Prompt Layout
-
-For each sample, the model sees:
 
 ```text
 <User profile>
@@ -40,35 +35,40 @@ Current item information:
 Title: <item title>
 Description: <item description>
 
-Useful token evidence for this explanation: <top-M token evidence>
-The explanation of <item title> is "
+The explanation of <item title> for <user ID> is "
 <generated explanation>
 ```
 
 ## Setup
 
 ```bash
-# Qwen3-4B causal LM
 bash aux/download_qwen3_4b.sh
-
-# Qwen3-Embedding-0.6B (optional; falls back to LM embed_tokens if missing)
 bash aux/download_qwen3_embedding_0.6b.sh
-
-# Or install deps and download both models
-bash aux/setup_graph_env.sh
-
-# User profiles (reuse gpt1 pipeline)
-conda activate fair
-python ../gpt1/generate_llama_user_profiles.py \
-  --profile-mode structured --folds 1 --scopes train,train_valid \
-  --output-dir ../gpt1/user_profiles_structured/Amazon/MoviesAndTV_small_15pct
+# or: bash aux/setup_graph_env.sh
 ```
+
+## Derive profiles for small dataset
+
+If LLM profiles already exist for the full dataset (e.g. `MoviesAndTV_corsa_filtered`),
+derive child-dataset caches in seconds without re-running Qwen3-4B:
+
+```bash
+conda run -n fair python aux/derive_profiles_from_parent.py \
+  --dataset_name Amazon/MoviesAndTV_corsa_filtered_small_15pct/ \
+  --source_dataset_name Amazon/MoviesAndTV_corsa_filtered \
+  --profile_dir data/profiles \
+  --fold 1 \
+  --scopes train,train_valid
+```
+
+Profile text is inherited from the parent (full interaction history). Training will
+prefer the child-specific paths under `data/profiles/Amazon/MoviesAndTV_corsa_filtered_small_15pct/`.
 
 ## Train
 
 ```bash
 bash aux/run.sh \
-  --dataset_name Amazon/MoviesAndTV_small_15pct \
+  --dataset_name Amazon/MoviesAndTV_corsa_filtered_small_15pct \
   --split_indices 1 \
   --allow_missing_profiles
 ```

@@ -167,7 +167,7 @@ class QwenEmbeddingEncoder(nn.Module):
             )
             self.model = AutoModel.from_pretrained(
                 model_path,
-                torch_dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
+                dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
                 device_map={"": str(device)} if device.type == "cuda" else None,
                 local_files_only=local_files_only,
                 trust_remote_code=True,

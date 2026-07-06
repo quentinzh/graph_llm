@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Train graph evidence selector + Qwen3-4B LoRA explainer."""
+"""Train profile-conditioned Qwen3-4B LoRA explainer."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ REPO_ROOT = PACKAGE_ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from graph_llm.aux.prompt_utils import build_evidence_prompt_batch, build_generation_prompt_batch
+from graph_llm.aux.prompt_utils import build_generation_prompt_batch
 from graph_llm.config.args import _is_local_model_dir
 from graph_llm.config import (
     dataset_cache_path,
@@ -44,6 +44,7 @@ from graph_llm.dataload.dataloader import (
     GraphCollater,
     GraphDataset,
     assert_profile_coverage,
+    compute_profile_lengths,
     dataset_split,
     load_profile_cache,
     read_split_indices,
@@ -51,7 +52,8 @@ from graph_llm.dataload.dataloader import (
     tokenizer_pad_id,
     tokenizer_special_ids,
 )
-from graph_llm.dataload.embeddings import QwenEmbeddingEncoder, default_embedding_model_path
+from graph_llm.dataload.embeddings import QwenEmbeddingEncoder
+from graph_llm.dataload.sampler import LengthBucketSampler
 from graph_llm.metrics.metrics import (
     assign_tail_demand_groups,
     bleu_score,
@@ -164,6 +166,31 @@ def resolve_devices_string(devices_value):
     if text.lower() in {"auto", "default", ""}:
         return str(default_preferred_device_id())
     return text
+
+
+def is_explicit_single_device(raw_devices):
+    text = str(raw_devices).strip().lower()
+    return text not in {"auto", "default", ""} and "," not in text
+
+
+def flash_attn_available():
+    try:
+        import flash_attn  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def resolve_attn_implementation(requested):
+    if requested != "flash_attention_2":
+        return requested
+    if flash_attn_available():
+        return "flash_attention_2"
+    raise ImportError(
+        "--attn_implementation flash_attention_2 requires the flash_attn package in "
+        "the active Python environment. Use graph_llm_fa2 (see "
+        "graph_llm/aux/setup_graph_fa2_env.sh) or install flash-attn manually."
+    )
 
 
 def dual_device_string(preferred_id):
@@ -356,6 +383,26 @@ def build_oom_plans(baseline):
     return plans
 
 
+def build_run_oom_plans(args, baseline, user_pinned_single):
+    if args.oom_fallback == "auto" and not user_pinned_single:
+        return build_oom_plans(baseline)
+    if user_pinned_single:
+        print(
+            f"Device pinned to {args.devices}: OOM fallback disabled. "
+            f"First OOM will raise (no batch reduction, no multi-GPU spread)."
+        )
+    return [
+        OOMPlan(
+            "manual",
+            args.devices,
+            None,
+            None,
+            args.gradient_checkpointing,
+            args.llm_device_map,
+        )
+    ]
+
+
 def apply_oom_plan(args, plan, baseline):
     args.devices = plan.devices
     args.batch_size = plan.batch_size if plan.batch_size is not None else baseline.batch_size
@@ -428,7 +475,17 @@ def build_dataset(args, tokenizer):
 
 def profile_dataset_name_candidates(dataset_name):
     clean_name = str(dataset_name).strip("/")
-    return [clean_name] if clean_name else []
+    if not clean_name:
+        return []
+    parts = [part for part in clean_name.split("/") if part]
+    candidates = ["/".join(parts)]
+    if len(parts) >= 2:
+        prefix = parts[:-1]
+        leaf = parts[-1]
+        while "_" in leaf:
+            leaf = leaf.rsplit("_", 1)[0]
+            candidates.append("/".join(prefix + [leaf]))
+    return list(dict.fromkeys(candidates))
 
 
 def profile_cache_candidate_paths(args, split_index, scope):
@@ -528,9 +585,9 @@ def apply_force(args, split_indices):
             _remove_path(embedding_fold)
 
         ckpt_prefix = ckpt_dir / dataset_name / fold
-        for suffix in ("model",):
+        for suffix in ("model", "selector.bin"):
             _remove_path(Path(f"{ckpt_prefix}{suffix}"))
-        for suffix in ("ped.bin", "selector.bin", "graph_config.json"):
+        for suffix in ("graph_config.json",):
             _remove_path(Path(f"{ckpt_prefix}{suffix}"))
 
         print(f"--force: regenerating profiles for fold {fold}")
@@ -550,8 +607,6 @@ def apply_force(args, split_indices):
 def unpack_batch(batch, device):
     (
         input_ids,
-        userid,
-        itemid,
         rating,
         profile_ids,
         profile_mask,
@@ -561,14 +616,13 @@ def unpack_batch(batch, device):
         graphs,
         item_texts,
         item_titles,
+        raw_users,
         feature_position_mask,
         feature_position_weights,
     ) = batch
     graph_tensors = {k: v.to(device) for k, v in graph_tensors.items()}
     return (
         input_ids.to(device),
-        userid.to(device),
-        itemid.to(device),
         rating.to(device),
         profile_ids.to(device),
         profile_mask.to(device),
@@ -578,83 +632,31 @@ def unpack_batch(batch, device):
         graphs,
         item_texts,
         item_titles,
+        raw_users,
         feature_position_mask.to(device),
         feature_position_weights.to(device),
     )
 
 
 def build_batch_prompt_tensors(
-    evidence_token_ids,
-    evidence_token_mask,
     item_titles,
+    raw_users,
     tokenizer,
     args,
     device,
 ):
     pad_id = tokenizer_pad_id(tokenizer)
-    evidence_prompt_ids, evidence_prompt_mask = build_evidence_prompt_batch(
-        evidence_token_ids,
-        evidence_token_mask,
-        tokenizer,
-        pad_id,
-        max_tokens=args.max_evidence_prompt_tokens,
-    )
     generation_prompt_ids, generation_prompt_mask = build_generation_prompt_batch(
         item_titles,
+        raw_users,
         tokenizer,
         pad_id,
         max_tokens=args.max_generation_prompt_tokens,
     )
     return (
-        evidence_prompt_ids.to(device),
-        evidence_prompt_mask.to(device),
         generation_prompt_ids.to(device),
         generation_prompt_mask.to(device),
     )
-
-
-def cuda_memory_status(devices):
-    if not torch.cuda.is_available():
-        return "CUDA memory: n/a"
-    if isinstance(devices, torch.device):
-        devices = [devices]
-    lines = []
-    for device in devices:
-        if device.type != "cuda":
-            continue
-        allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)
-        peak_allocated = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
-        peak_reserved = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
-        lines.append(
-            f"{device} GiB current allocated/reserved={allocated:.2f}/{reserved:.2f}, "
-            f"peak allocated/reserved={peak_allocated:.2f}/{peak_reserved:.2f}"
-        )
-    if not lines:
-        return "CUDA memory: n/a"
-    return "CUDA memory " + "; ".join(lines)
-
-
-def maybe_warn_cuda_memory(devices, warn_gib):
-    if warn_gib <= 0 or not torch.cuda.is_available():
-        return
-    if isinstance(devices, torch.device):
-        devices = [devices]
-    for device in devices:
-        if device.type != "cuda":
-            continue
-        peak_reserved = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
-        if peak_reserved > warn_gib:
-            msg = (
-                f"WARNING: {device} peak reserved memory {peak_reserved:.2f} GiB "
-                f"exceeds --memory_warn_gib={warn_gib:g}"
-            )
-            print(msg)
-
-
-def write_log(log_name, message):
-    with open(log_name, "a+", encoding="utf-8") as f:
-        f.write(message + "\n")
 
 
 def compute_batch_selector_tensors(
@@ -715,6 +717,50 @@ def compute_batch_selector_tensors(
     )
 
 
+def cuda_memory_status(devices):
+    if not torch.cuda.is_available():
+        return "CUDA memory: n/a"
+    if isinstance(devices, torch.device):
+        devices = [devices]
+    lines = []
+    for device in devices:
+        if device.type != "cuda":
+            continue
+        allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)
+        peak_allocated = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+        peak_reserved = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
+        lines.append(
+            f"{device} GiB current allocated/reserved={allocated:.2f}/{reserved:.2f}, "
+            f"peak allocated/reserved={peak_allocated:.2f}/{peak_reserved:.2f}"
+        )
+    if not lines:
+        return "CUDA memory: n/a"
+    return "CUDA memory " + "; ".join(lines)
+
+
+def maybe_warn_cuda_memory(devices, warn_gib):
+    if warn_gib <= 0 or not torch.cuda.is_available():
+        return
+    if isinstance(devices, torch.device):
+        devices = [devices]
+    for device in devices:
+        if device.type != "cuda":
+            continue
+        peak_reserved = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
+        if peak_reserved > warn_gib:
+            msg = (
+                f"WARNING: {device} peak reserved memory {peak_reserved:.2f} GiB "
+                f"exceeds --memory_warn_gib={warn_gib:g}"
+            )
+            print(msg)
+
+
+def write_log(log_name, message):
+    with open(log_name, "a+", encoding="utf-8") as f:
+        f.write(message + "\n")
+
+
 def train_epoch(
     model,
     embedding_encoder,
@@ -741,8 +787,6 @@ def train_epoch(
         last_batch_idx = batch_idx
         (
             input_ids,
-            userid,
-            itemid,
             _rating,
             profile_ids,
             profile_mask,
@@ -752,6 +796,7 @@ def train_epoch(
             graphs,
             item_texts,
             item_titles,
+            raw_users,
             feature_position_mask,
             feature_position_weights,
         ) = unpack_batch(batch, device)
@@ -761,29 +806,22 @@ def train_epoch(
                 model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device,
             )
         )
-        evidence_prompt_ids, evidence_prompt_mask, generation_prompt_ids, generation_prompt_mask = (
-            build_batch_prompt_tensors(
-                evidence_token_ids,
-                evidence_token_mask,
-                item_titles,
-                tokenizer,
-                args,
-                device,
-            )
+        generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
+            item_titles,
+            raw_users,
+            tokenizer,
+            args,
+            device,
         )
 
         try:
             with autocast():
                 loss, nll_loss, ul_loss, feat_loss = model.train_step(
                     input_ids,
-                    userid,
-                    itemid,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
                     target_item_ids=target_item_ids,
                     target_item_mask=target_item_mask,
-                    evidence_prompt_ids=evidence_prompt_ids,
-                    evidence_prompt_mask=evidence_prompt_mask,
                     generation_prompt_ids=generation_prompt_ids,
                     generation_prompt_mask=generation_prompt_mask,
                     neg_token_ids=neg_token_ids,
@@ -849,8 +887,6 @@ def valid_step(model, embedding_encoder, dataloader, device, log_name, args, tok
         for batch in tqdm(dataloader, desc=f"Valid epoch {epoch}"):
             (
                 input_ids,
-                userid,
-                itemid,
                 _rating,
                 profile_ids,
                 profile_mask,
@@ -860,6 +896,7 @@ def valid_step(model, embedding_encoder, dataloader, device, log_name, args, tok
                 graphs,
                 item_texts,
                 item_titles,
+                raw_users,
                 feature_position_mask,
                 feature_position_weights,
             ) = unpack_batch(batch, device)
@@ -868,27 +905,20 @@ def valid_step(model, embedding_encoder, dataloader, device, log_name, args, tok
                     model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device,
                 )
             )
-            evidence_prompt_ids, evidence_prompt_mask, generation_prompt_ids, generation_prompt_mask = (
-                build_batch_prompt_tensors(
-                    evidence_token_ids,
-                    evidence_token_mask,
-                    item_titles,
-                    tokenizer,
-                    args,
-                    device,
-                )
+            generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
+                item_titles,
+                raw_users,
+                tokenizer,
+                args,
+                device,
             )
             with autocast():
                 loss, _nll, _ul, _feat = model.train_step(
                     input_ids,
-                    userid,
-                    itemid,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
                     target_item_ids=target_item_ids,
                     target_item_mask=target_item_mask,
-                    evidence_prompt_ids=evidence_prompt_ids,
-                    evidence_prompt_mask=evidence_prompt_mask,
                     generation_prompt_ids=generation_prompt_ids,
                     generation_prompt_mask=generation_prompt_mask,
                     neg_token_ids=neg_token_ids,
@@ -1064,8 +1094,6 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Test generate")):
             (
                 input_ids,
-                userid,
-                itemid,
                 _rating,
                 profile_ids,
                 profile_mask,
@@ -1075,31 +1103,25 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 graphs,
                 item_texts,
                 item_titles,
+                raw_users,
                 _feature_position_mask,
                 _feature_position_weights,
             ) = unpack_batch(batch, device)
             evidence_token_ids, evidence_token_mask, _, _, _ = compute_batch_selector_tensors(
                 model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device,
             )
-            evidence_prompt_ids, evidence_prompt_mask, generation_prompt_ids, generation_prompt_mask = (
-                build_batch_prompt_tensors(
-                    evidence_token_ids,
-                    evidence_token_mask,
-                    item_titles,
-                    tokenizer,
-                    args,
-                    device,
-                )
+            generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
+                item_titles,
+                raw_users,
+                tokenizer,
+                args,
+                device,
             )
             generated = model.greedy_generate(
-                userid,
-                itemid,
                 profile_ids,
                 profile_mask,
                 target_item_ids,
                 target_item_mask,
-                evidence_prompt_ids,
-                evidence_prompt_mask,
                 generation_prompt_ids,
                 generation_prompt_mask,
                 word,
@@ -1155,15 +1177,12 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
 
 
 def load_best_checkpoint(model, ckpt_prefix, device):
-    ped_path = ckpt_prefix + "ped.bin"
     selector_path = ckpt_prefix + "selector.bin"
     adapter_path = ckpt_prefix + "model"
-    if not os.path.exists(ped_path) or not os.path.isdir(adapter_path):
+    if not os.path.isdir(adapter_path):
         raise FileNotFoundError(f"No checkpoint found at {ckpt_prefix}")
     model.model.load_adapter(adapter_path, "best_lora")
     model.model.set_adapter("best_lora")
-    model.collaborative_encoder = torch.load(ped_path, map_location=device, weights_only=False)
-    model.collaborative_encoder.to(device)
     if os.path.exists(selector_path):
         state = torch.load(selector_path, map_location=device, weights_only=False)
         model.evidence_selector.load_state_dict(state)
@@ -1308,9 +1327,21 @@ def _run_split(
         f"Creating dataloaders: train={len(train_set)}, valid={len(valid_set)}, "
         f"test={len(test_set)}, batch_size={args.batch_size}"
     )
+    profile_lengths = compute_profile_lengths(
+        train_set,
+        train_profiles,
+        tokenizer,
+        args.max_profile_tokens,
+    )
+    train_sampler = LengthBucketSampler(
+        profile_lengths,
+        args.batch_size,
+        shuffle=True,
+        seed=args.seed,
+    )
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, collate_fn=collate_train,
-        shuffle=True, pin_memory=True, num_workers=args.num_workers,
+        sampler=train_sampler, pin_memory=True, num_workers=args.num_workers,
     )
     valid_loader = DataLoader(
         valid_set, batch_size=eval_batch_size, collate_fn=collate_valid,
@@ -1337,12 +1368,13 @@ def _run_split(
         else 0.0
     )
     llm_load_kwargs = {
-        "torch_dtype": resolve_torch_dtype(args.torch_dtype),
+        "dtype": resolve_torch_dtype(args.torch_dtype),
         "local_files_only": True,
         "trust_remote_code": True,
     }
-    if args.attn_implementation != "auto":
-        llm_load_kwargs["attn_implementation"] = args.attn_implementation
+    attn_impl = resolve_attn_implementation(args.attn_implementation)
+    if attn_impl != "auto":
+        llm_load_kwargs["attn_implementation"] = attn_impl
     if llm_device_map_mode == "balanced" and len(device_ids) >= 2:
         max_memory = build_llm_max_memory(
             device_ids,
@@ -1401,10 +1433,6 @@ def _run_split(
     ).to(device)
 
     model = GraphEvidenceCIER(
-        user_num=user_num,
-        item_num=item_num,
-        hidden=args.id_hidden,
-        llm_hidden=model_llm.config.hidden_size,
         tokenizer=tokenizer,
         vocab_size=model_llm.config.vocab_size,
         evidence_selector=selector,
@@ -1420,14 +1448,7 @@ def _run_split(
 
     optimizer = AdamW([
         {
-            "params": [
-                p for module in [
-                    model.collaborative_encoder,
-                    model.evidence_selector,
-                ]
-                if module is not None
-                for p in module.parameters() if p.requires_grad
-            ],
+            "params": [p for p in model.evidence_selector.parameters() if p.requires_grad],
             "lr": args.learning_rate,
         },
         {
@@ -1463,7 +1484,6 @@ def _run_split(
         f.write(
             f"max_profile_tokens:{args.max_profile_tokens} "
             f"max_target_item_tokens:{args.max_target_item_tokens} "
-            f"max_evidence_prompt_tokens:{args.max_evidence_prompt_tokens} "
             f"max_generation_prompt_tokens:{args.max_generation_prompt_tokens} "
             f"max_graph_nodes:{args.max_graph_nodes}\n"
         )
@@ -1499,6 +1519,8 @@ def _run_split(
     early_stop = args.early_stop_patience
     if not args.only_eval:
         for epoch in range(args.epochs):
+            if hasattr(train_loader.sampler, "set_epoch"):
+                train_loader.sampler.set_epoch(epoch)
             train_epoch(
                 model, embedding_encoder, train_loader, optimizer, device,
                 cuda_devices, epoch, args, scaler, log_name, tokenizer,
@@ -1515,7 +1537,6 @@ def _run_split(
                     f.write("save model\n")
                     best_loss = valid_loss
                     model.model.save_pretrained(ckpt_prefix + "model")
-                    torch.save(model.collaborative_encoder, ckpt_prefix + "ped.bin")
                     torch.save(model.evidence_selector.state_dict(), ckpt_prefix + "selector.bin")
                     with open(ckpt_prefix + "graph_config.json", "w", encoding="utf-8") as cf:
                         json.dump(vars(args), cf, indent=2, default=str)
@@ -1537,15 +1558,13 @@ def run(args):
     _prompt_budget = (
         args.max_profile_tokens
         + args.max_target_item_tokens
-        + args.max_evidence_prompt_tokens
         + args.max_generation_prompt_tokens
-        + 2  # collaborative prefix (hardcoded)
     )
     if _prompt_budget > 512:
         print(
             f"WARNING: prompt token budget ({_prompt_budget}) > 512. "
             f"profile={args.max_profile_tokens} item={args.max_target_item_tokens} "
-            f"evidence={args.max_evidence_prompt_tokens} generation={args.max_generation_prompt_tokens}"
+            f"generation={args.max_generation_prompt_tokens}"
         )
     args.model_path = resolve_local_model_path(
         args.model_path,
@@ -1555,22 +1574,12 @@ def run(args):
     if getattr(args, "force", False):
         apply_force(args, split_indices)
     preflight_profile_cache_files(args, split_indices)
+    raw_devices = str(args.devices).strip()
+    user_pinned_single = is_explicit_single_device(raw_devices)
     baseline = snapshot_training_args(args)
     args.devices = resolve_devices_string(args.devices)
     baseline.devices = args.devices
-    if args.oom_fallback == "auto":
-        oom_plans = build_oom_plans(baseline)
-    else:
-        oom_plans = [
-            OOMPlan(
-                "manual",
-                args.devices,
-                None,
-                None,
-                args.gradient_checkpointing,
-                args.llm_device_map,
-            )
-        ]
+    oom_plans = build_run_oom_plans(args, baseline, user_pinned_single)
     print(
         f"Preferred GPU: cuda:{default_preferred_device_id()} "
         f"initial devices={args.devices} oom_fallback={args.oom_fallback} "

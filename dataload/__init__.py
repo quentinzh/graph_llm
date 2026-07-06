@@ -3,6 +3,7 @@
 from graph_llm.dataload.cache import GraphCacheManager
 from graph_llm.dataload.dataloader import GraphCollater, GraphDataset
 from graph_llm.dataload.embeddings import EmbeddingCache, QwenEmbeddingEncoder, default_embedding_model_path
+from graph_llm.dataload.sampler import LengthBucketSampler
 
 __all__ = [
     "GraphCacheManager",
@@ -11,4 +12,5 @@ __all__ = [
     "EmbeddingCache",
     "QwenEmbeddingEncoder",
     "default_embedding_model_path",
+    "LengthBucketSampler",
 ]

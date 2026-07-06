@@ -9,6 +9,7 @@ from types import ModuleType, SimpleNamespace
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,8 +24,8 @@ if find_spec("peft") is None:
     peft_stub.get_peft_model = lambda model, _config: model
     sys.modules["peft"] = peft_stub
 
+from graph_llm.aux.derive_profiles_from_parent import derive_profiles
 from graph_llm.aux.prompt_utils import (
-    build_evidence_prompt_text,
     build_generation_prompt_text,
     build_generation_prompt_batch,
     item_meta_from_row,
@@ -50,17 +51,42 @@ from graph_llm.config import (
 from graph_llm.train.trainer import (
     build_llm_max_memory,
     build_oom_plans,
+    build_run_oom_plans,
     compute_batch_selector_tensors,
     default_preferred_device_id,
+    flash_attn_available,
+    is_explicit_single_device,
     parse_device_ids,
     profile_cache_path,
     profile_dataset_name_candidates,
     preflight_profile_cache_files,
+    resolve_attn_implementation,
     resolve_devices_string,
     resolve_embedding_device,
     resolve_llm_device_map_mode,
     resolve_training_devices,
 )
+
+
+
+
+def _make_model(tokenizer, **kwargs):
+    defaults = dict(
+        tokenizer=tokenizer,
+        vocab_size=32,
+        evidence_selector=EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1),
+        lambda_ul=0.1,
+        lambda_feat=0.0,
+        evidence_bonus=0.0,
+        pad_token_id=0,
+        eos_token_ids=(2,),
+        special_token_ids=(0, 1, 2),
+    )
+    defaults.update(kwargs)
+    if "evidence_selector" not in kwargs and kwargs.get("_selector") is not None:
+        defaults["evidence_selector"] = kwargs["_selector"]
+    defaults.pop("_selector", None)
+    return GraphEvidenceCIER(**defaults)
 
 
 class DummyTokenizer:
@@ -76,7 +102,7 @@ class DummyTokenizer:
             "good story": [11, 13, 14],
             "target item leak": [99, 100],
             "Relevant keywords: great, movie\n": [20, 21, 22],
-            'The explanation of Inception is "': [30, 31],
+            'The explanation of Inception for user_a is "': [30, 31],
             "Current item information:\nTitle: Inception\nDescription: A dream heist film\n\n": [40, 41],
             " television": [21],
             "television": [19, 20],
@@ -185,20 +211,7 @@ def test_selector_shapes():
 
 def test_ul_masking():
     tokenizer = DummyTokenizer()
-    selector = EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1)
-    model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=16,
-        tokenizer=tokenizer,
-        vocab_size=32,
-        evidence_selector=selector,
-        lambda_ul=0.1,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
-    )
+    model = _make_model(tokenizer)
 
     gen_logits = torch.zeros(1, 2, 32)
     gen_logits[0, 0, 10] = 3.0
@@ -223,16 +236,10 @@ def test_ul_masking():
     assert ul.item() > 0.0
 
 
-def test_prompt_text_includes_title_and_evidence():
+def test_prompt_text_includes_title_and_user_id():
     tokenizer = DummyTokenizer()
-    evidence_text = build_evidence_prompt_text([10, 11, 15, 16, 17], tokenizer)
-    assert "great" in evidence_text
-    assert "movie" in evidence_text
-    assert "the" not in evidence_text
-    assert "1" not in evidence_text
-    assert "j" not in evidence_text
-    generation_text = build_generation_prompt_text("Inception")
-    assert generation_text == 'The explanation of Inception is "'
+    generation_text = build_generation_prompt_text("Inception", "user_a")
+    assert generation_text == 'The explanation of Inception for user_a is "'
 
     title, description, item_text = item_meta_from_row(
         "item123",
@@ -240,62 +247,32 @@ def test_prompt_text_includes_title_and_evidence():
     )
     assert title == "Inception"
     assert "Title: Inception" in item_text
-    assert "Description: A dream heist film" in item_text
 
     gen_ids, gen_mask = build_generation_prompt_batch(
-        ["Inception"], tokenizer, pad_token_id=0, max_tokens=32,
+        ["Inception"], ["user_a"], tokenizer, pad_token_id=0, max_tokens=32,
     )
     assert gen_ids.shape[0] == 1
     assert gen_mask.sum().item() > 0
 
 
+
 def test_prompt_length_accounts_for_new_segments():
     tokenizer = DummyTokenizer()
-    selector = EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1)
-    model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=16,
-        tokenizer=tokenizer,
-        vocab_size=32,
-        evidence_selector=selector,
-        lambda_ul=0.1,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
-    )
+    model = _make_model(tokenizer)
     profile_ids = torch.tensor([[1, 2, 3]])
     target_item_ids = torch.tensor([[4, 5]])
-    evidence_prompt_ids = torch.tensor([[6, 7]])
     generation_prompt_ids = torch.tensor([[8, 9, 10]])
     prompt_len = model._prompt_length(
         profile_ids,
         target_item_ids,
-        evidence_prompt_ids,
         generation_prompt_ids,
     )
-    assert prompt_len == 3 + 2 + 2 + 2 + 3
+    assert prompt_len == 3 + 2 + 3
 
 
 def test_generation_controls_filter_evidence_and_block_repeats():
     tokenizer = DummyTokenizer()
-    selector = EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1)
-    model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=16,
-        tokenizer=tokenizer,
-        vocab_size=32,
-        evidence_selector=selector,
-        lambda_ul=0.1,
-        evidence_bonus=0.5,
-        max_consecutive_token_repeat=2,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
-    )
+    model = _make_model(tokenizer, lambda_ul=0.1, evidence_bonus=0.5, max_consecutive_token_repeat=2)
     logits = torch.zeros(1, 32)
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10, 15, 16, 17]], pad_value=-1)
     adjusted = model._apply_evidence_bonus(logits.clone(), evidence_token_ids, evidence_token_mask)
@@ -317,30 +294,18 @@ def test_train_step_uses_adjusted_logits_nll():
     fixed_logits[0, 10] = 1.5
     fixed_logits[1, 11] = 0.5
 
-    model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=8,
-        tokenizer=tokenizer,
-        vocab_size=32,
+    model = _make_model(
+        tokenizer,
         evidence_selector=selector,
         lambda_ul=0.0,
         evidence_bonus=0.0,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
     )
     model.model = FixedLogitLM(logits=fixed_logits)
 
     input_ids = torch.tensor([[10, 11]])
-    userid = torch.tensor([0])
-    itemid = torch.tensor([1])
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10]], pad_value=-1)
     loss, nll, ul, feat = model.train_step(
         input_ids,
-        userid,
-        itemid,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
         apply_unlikelihood=False,
@@ -359,31 +324,19 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     selector = EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1)
     profile_ids = torch.tensor([[3, 4, 5]])
     target_item_ids = torch.tensor([[6]])
-    evidence_prompt_ids = torch.tensor([[7, 8]])
     generation_prompt_ids = torch.tensor([[9]])
     input_ids = torch.tensor([[10, 11]])
-    userid = torch.tensor([0])
-    itemid = torch.tensor([1])
 
-    model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=8,
-        tokenizer=tokenizer,
-        vocab_size=32,
+    model = _make_model(
+        tokenizer,
         evidence_selector=selector,
         lambda_ul=0.0,
         evidence_bonus=0.0,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
     )
 
     prompt_len = model._prompt_length(
         profile_ids,
         target_item_ids,
-        evidence_prompt_ids,
         generation_prompt_ids,
     )
     total_len = prompt_len + input_ids.shape[1]
@@ -395,14 +348,10 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
 
     loss, nll, ul, feat = model.train_step(
         input_ids,
-        userid,
-        itemid,
         profile_ids=profile_ids,
         profile_mask=torch.ones_like(profile_ids),
         target_item_ids=target_item_ids,
         target_item_mask=torch.ones_like(target_item_ids),
-        evidence_prompt_ids=evidence_prompt_ids,
-        evidence_prompt_mask=torch.ones_like(evidence_prompt_ids),
         generation_prompt_ids=generation_prompt_ids,
         generation_prompt_mask=torch.ones_like(generation_prompt_ids),
         apply_unlikelihood=False,
@@ -429,50 +378,20 @@ def test_evidence_bonus_reduces_nll_for_gold_evidence_token():
     itemid = torch.tensor([1])
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10]], pad_value=-1)
 
-    no_bonus_model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=8,
-        tokenizer=tokenizer,
-        vocab_size=32,
-        evidence_selector=selector,
-        lambda_ul=0.0,
-        evidence_bonus=0.0,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
-    )
+    no_bonus_model = _make_model(tokenizer, lambda_ul=0.0, evidence_bonus=0.0)
     no_bonus_model.model = FixedLogitLM(logits=fixed_logits)
 
-    bonus_model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=8,
-        tokenizer=tokenizer,
-        vocab_size=32,
-        evidence_selector=selector,
-        lambda_ul=0.0,
-        evidence_bonus=0.5,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
-    )
+    bonus_model = _make_model(tokenizer, lambda_ul=0.0, evidence_bonus=0.5)
     bonus_model.model = FixedLogitLM(logits=fixed_logits)
 
     _loss0, nll0, _ul0, _feat0 = no_bonus_model.train_step(
         input_ids,
-        userid,
-        itemid,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
         apply_unlikelihood=False,
     )
     _loss_bonus, nll_bonus, _ul_bonus, _feat_bonus = bonus_model.train_step(
         input_ids,
-        userid,
-        itemid,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
         apply_unlikelihood=False,
@@ -493,33 +412,21 @@ def test_feature_learning_loss_uses_matched_target_positions():
     fixed_logits[0, 11] = 2.0
     fixed_logits[1, 12] = 1.0
 
-    model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=8,
-        tokenizer=tokenizer,
-        vocab_size=32,
+    model = _make_model(
+        tokenizer,
         evidence_selector=selector,
         lambda_ul=0.1,
         lambda_feat=0.5,
         evidence_bonus=0.0,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
     )
     model.model = FixedLogitLM(logits=fixed_logits)
 
     input_ids = torch.tensor([[11, 12]])
-    userid = torch.tensor([0])
-    itemid = torch.tensor([1])
     feature_position_mask = torch.tensor([[False, True]])
     feature_position_weights = torch.tensor([[0.0, 1.0]])
 
     loss, nll, ul, feat = model.train_step(
         input_ids,
-        userid,
-        itemid,
         feature_position_mask=feature_position_mask,
         feature_position_weights=feature_position_weights,
         apply_unlikelihood=True,
@@ -610,13 +517,14 @@ def test_graph_collater_batch_layout_without_auxiliary_fields():
             "split_name": "test",
         }
     ])
-    assert len(batch) == 14
+    assert len(batch) == 13
     assert batch[0].tolist() == [[10, 11]]
-    assert "node_token_ids" in batch[8]
-    assert isinstance(batch[9], list)
-    assert batch[12].shape[0] == 1
-    assert batch[12].dtype == torch.bool
-    assert batch[13].dtype == torch.float32
+    assert "node_token_ids" in batch[6]
+    assert isinstance(batch[7], list)
+    assert batch[7] == ["user_a"]
+    assert batch[11].shape[0] == 1
+    assert batch[11].dtype == torch.bool
+    assert batch[12].dtype == torch.float32
 
 
 def test_graph_collater_feature_mask_matches_spaced_keyword_variant():
@@ -643,8 +551,8 @@ def test_graph_collater_feature_mask_matches_spaced_keyword_variant():
             "split_name": "test",
         }
     ])
-    assert batch[12].tolist() == [[False, True, False]]
-    assert batch[13].tolist() == [[0.0, 1.0, 0.0]]
+    assert batch[11].tolist() == [[False, True, False]]
+    assert batch[12].tolist() == [[0.0, 1.0, 0.0]]
 
 
 def test_graph_collater_feature_mask_filters_short_bpe_pieces():
@@ -671,8 +579,8 @@ def test_graph_collater_feature_mask_filters_short_bpe_pieces():
             "split_name": "test",
         }
     ])
-    assert batch[12].tolist() == [[False, True]]
-    assert batch[13].tolist() == [[0.0, 1.0]]
+    assert batch[11].tolist() == [[False, True]]
+    assert batch[12].tolist() == [[0.0, 1.0]]
 
 
 def test_lora_defaults_target_qkvo_r16():
@@ -683,14 +591,14 @@ def test_lora_defaults_target_qkvo_r16():
     assert args.lora_target_modules == "q_proj,k_proj,v_proj,o_proj"
 
 
-def test_standalone_default_paths_are_graph_llm_local():
+def test_standalone_default_paths_are_graph_local():
     args = build_arg_parser().parse_args([])
     graph_root = ROOT.resolve()
     assert Path(args.data_dir).resolve() == graph_root / "data"
-    assert Path(args.profile_dir).resolve() == graph_root / "data" / "profiles"
+    assert Path(args.profile_dir).resolve() == graph_root / "user_profiles_structured"
     model_candidates = {path.resolve() for path in qwen3_4b_model_candidates()}
     assert Path(args.model_path).resolve() in model_candidates
-    assert Path(args.embedding_model_path).resolve() == graph_root / "pretrain_llm" / "qwen3-embedding-0.6b"
+    assert Path(args.embedding_model_path).resolve() == graph_root / "models" / "qwen3-embedding-0.6b"
     assert args.dataset_name == "Amazon/MoviesAndTV_corsa_filtered_small_15pct/"
 
 
@@ -716,9 +624,9 @@ def test_build_llm_max_memory_reserves_embedding_space():
     assert max_memory[1] == "30GiB"
 
 
-def test_resolve_local_model_path_prefers_graph_llm_copy():
+def test_resolve_local_model_path_prefers_graph_copy():
     graph_root = ROOT.resolve()
-    graph_copy = graph_root / "pretrain_llm" / "qwen3-4b"
+    graph_copy = graph_root / "models" / "qwen3-4b"
     gpt1_copy = REPO / "gpt1" / "models" / "qwen3-4b"
     if not (graph_copy / "config.json").exists() and not (gpt1_copy / "config.json").exists():
         return
@@ -738,22 +646,113 @@ def test_standalone_metrics_available():
     assert {"rouge_1", "rouge_2", "rouge_l"}.issubset(scores)
 
 
-def test_profile_cache_uses_exact_dataset_name():
-    candidates = profile_dataset_name_candidates("Amazon/MoviesAndTV_corsa_filtered_small_15pct/")
-    assert candidates == ["Amazon/MoviesAndTV_corsa_filtered_small_15pct"]
+def test_derive_profiles_from_parent_subset():
+    """子数据集 profile 应从父 profile 按 split 用户过滤派生。"""
+    import pickle
 
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
-        dataset_dir = base / "Amazon" / "MoviesAndTV_corsa_filtered_small_15pct"
-        dataset_dir.mkdir(parents=True)
-        (dataset_dir / "fold_1_train.pkl").write_bytes(b"cache")
-        (dataset_dir / "fold_1_train_valid.pkl").write_bytes(b"cache")
+        data_dir = base / "data"
+        profile_dir = base / "profiles"
+        parent_name = "Amazon/MoviesAndTV_corsa_filtered"
+        child_name = "Amazon/MoviesAndTV_corsa_filtered_small_15pct"
+
+        reviews = pd.DataFrame(
+            {
+                "user": ["u1", "u1", "u2", "u3"],
+                "item": ["i1", "i2", "i3", "i4"],
+                "rating": [5, 4, 3, 2],
+                "template": [("k", "w", "t")] * 4,
+            }
+        )
+        child_ds = data_dir / child_name
+        child_ds.mkdir(parents=True)
+        reviews.to_pickle(child_ds / "reviews.pickle")
+        fold_dir = child_ds / "1"
+        fold_dir.mkdir(parents=True)
+        (fold_dir / "train.index").write_text("0 1 2\n", encoding="utf-8")
+        (fold_dir / "validation.index").write_text("2\n", encoding="utf-8")
+        (fold_dir / "test.index").write_text("3\n", encoding="utf-8")
+
+        parent_profiles = {
+            "u1": {
+                "raw_user": "u1",
+                "scope": "train",
+                "profile_text": "profile u1",
+                "llama_profile": "profile u1",
+            },
+            "u2": {
+                "raw_user": "u2",
+                "scope": "train",
+                "profile_text": "profile u2",
+                "llama_profile": "profile u2",
+            },
+            "u3": {
+                "raw_user": "u3",
+                "scope": "train",
+                "profile_text": "profile u3",
+                "llama_profile": "profile u3",
+            },
+        }
+        parent_dir = profile_dir / parent_name
+        parent_dir.mkdir(parents=True)
+        with (parent_dir / "fold_1_train.pkl").open("wb") as f:
+            pickle.dump(parent_profiles, f)
+        with (parent_dir / "fold_1_train_valid.pkl").open("wb") as f:
+            pickle.dump(parent_profiles, f)
+
+        written = derive_profiles(
+            data_dir=data_dir,
+            dataset_name=child_name,
+            profile_dir=profile_dir,
+            fold="1",
+            scopes=["train", "train_valid"],
+            source_dataset_name=parent_name,
+            overwrite=True,
+        )
+
+        train_path = written["train"]
+        with train_path.open("rb") as f:
+            train_profiles = pickle.load(f)
+        assert set(train_profiles.keys()) == {"u1", "u2"}
+        assert train_profiles["u1"]["scope"] == "train"
+        assert train_profiles["u1"]["derived_from"].endswith("fold_1_train.pkl")
+        assert train_profiles["u1"]["profile_text"] == "profile u1"
+
+        with written["train_valid"].open("rb") as f:
+            tv_profiles = pickle.load(f)
+        assert set(tv_profiles.keys()) == {"u1", "u2"}
+        assert tv_profiles["u2"]["scope"] == "train_valid"
+
+        args = SimpleNamespace(
+            profile_dir=str(profile_dir),
+            dataset_name=f"{child_name}/",
+            allow_missing_profiles=False,
+        )
+        assert profile_cache_path(args, "1", "train") == train_path
+
+
+def test_profile_cache_falls_back_to_base_dataset():
+    candidates = profile_dataset_name_candidates("Amazon/MoviesAndTV_corsa_filtered_small_15pct/")
+    assert candidates[:2] == [
+        "Amazon/MoviesAndTV_corsa_filtered_small_15pct",
+        "Amazon/MoviesAndTV_corsa_filtered_small",
+    ]
+    assert "Amazon/MoviesAndTV_corsa_filtered" in candidates
+    assert "Amazon/MoviesAndTV" in candidates
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        fallback_dir = base / "Amazon" / "MoviesAndTV"
+        fallback_dir.mkdir(parents=True)
+        (fallback_dir / "fold_1_train.pkl").write_bytes(b"cache")
+        (fallback_dir / "fold_1_train_valid.pkl").write_bytes(b"cache")
         args = SimpleNamespace(
             profile_dir=str(base),
             dataset_name="Amazon/MoviesAndTV_corsa_filtered_small_15pct/",
             allow_missing_profiles=False,
         )
-        assert profile_cache_path(args, "1", "train") == dataset_dir / "fold_1_train.pkl"
+        assert profile_cache_path(args, "1", "train") == fallback_dir / "fold_1_train.pkl"
         preflight_profile_cache_files(args, ["1"])
 
 
@@ -859,20 +858,8 @@ def test_compute_batch_selector_tensors_moves_embeddings_to_primary():
         primary = torch.device("cpu")
 
     tokenizer = DummyTokenizer()
-    selector = EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1)
-    model = GraphEvidenceCIER(
-        user_num=2,
-        item_num=2,
-        hidden=8,
-        llm_hidden=8,
-        tokenizer=tokenizer,
-        vocab_size=32,
-        evidence_selector=selector,
-        lambda_ul=0.0,
-        pad_token_id=0,
-        eos_token_ids=(2,),
-        special_token_ids=(0, 1, 2),
-    )
+    model = _make_model(tokenizer, lambda_ul=0.0)
+    model.evidence_selector.to(primary)
     graph = UserTokenGraph(
         node_token_ids=np.array([10, 11], dtype=np.int64),
         node_surfaces=["great", "movie"],
@@ -932,8 +919,9 @@ if __name__ == "__main__":
     test_directed_edges_and_leakage()
     test_selector_shapes()
     test_ul_masking()
-    test_prompt_text_includes_title_and_evidence()
+    test_prompt_text_includes_title_and_user_id()
     test_prompt_length_accounts_for_new_segments()
+    test_generation_controls_filter_evidence_and_block_repeats()
     test_batch_graphs()
     test_high_frequency_negative_selection()
     test_tokenize_text_list_padding()
@@ -946,6 +934,6 @@ if __name__ == "__main__":
     test_resolve_llm_device_map_mode_auto()
     test_build_llm_max_memory_reserves_embedding_space()
     test_compute_batch_selector_tensors_moves_embeddings_to_primary()
-    test_resolve_local_model_path_prefers_graph_llm_copy()
+    test_resolve_local_model_path_prefers_graph_copy()
     test_embedding_cache_corruption_recovery()
-    print("graph_llm smoke tests passed")
+    print("graph smoke tests passed")

@@ -42,11 +42,19 @@ def resolve_dataset_paths(args) -> None:
             reviews_path = root / canonical / "reviews.pickle"
             tried.append(str(reviews_path))
             if reviews_path.is_file():
-                args.dataset_name = canonical
+                # Match graph2's verbatim cache naming. graph2 run.sh uses
+                # "Amazon/X/" (trailing slash -> Amazon__X__) for Amazon datasets,
+                # while flat names like "TripAdvisor_corsa_filtered" have no slash
+                # (-> TripAdvisor_corsa_filtered). Keep a trailing slash only when
+                # the canonical name contains a path separator.
+                if "/" in canonical:
+                    args.dataset_name = canonical.rstrip("/") + "/"
+                else:
+                    args.dataset_name = canonical
                 args.data_dir = str(root)
                 print(
                     f"Resolved dataset '{user_name}' -> "
-                    f"dataset_name={canonical!r}, data_dir={root}"
+                    f"dataset_name={args.dataset_name!r}, data_dir={root}"
                 )
                 return
 

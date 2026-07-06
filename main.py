@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import sys
 from pathlib import Path
 
@@ -15,4 +19,6 @@ from graph_llm.config import build_arg_parser
 from graph_llm.train import run
 
 if __name__ == "__main__":
-    run(build_arg_parser().parse_args())
+    parser = build_arg_parser()
+    parser.set_defaults(lambda_ul=0.1)
+    run(parser.parse_args())

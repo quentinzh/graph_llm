@@ -29,7 +29,7 @@ fi
 
 LOG_DIR="$GRAPH_ROOT/log"
 DATASET_NAME="Amazon/MoviesAndTV_corsa_filtered_small_15pct/"
-LOG_NAME="graph_evidence.log"
+LOG_NAME="graph_profile.log"
 ARGS=("$@")
 
 for ((idx = 0; idx < ${#ARGS[@]}; idx++)); do

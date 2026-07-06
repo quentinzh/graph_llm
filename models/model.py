@@ -1,4 +1,4 @@
-"""Graph-guided explanation model with evidence selector and UL loss."""
+"""Graph-guided explanation model with selector UL loss (no evidence text in prompt)."""
 
 from __future__ import annotations
 
@@ -20,32 +20,11 @@ CONTROL_STOPWORDS = {
 }
 
 
-class CollaborativeEncoder(nn.Module):
-    """Learned user/item collaborative signals as two prefix token embeddings."""
-
-    def __init__(self, user_num, item_num, hidden=1024, output_hidden=4096):
-        super().__init__()
-        self.user_embedding = nn.Embedding(user_num, hidden)
-        self.item_embedding = nn.Embedding(item_num, hidden)
-        self.mlp_u = nn.Linear(hidden, output_hidden)
-        self.mlp_v = nn.Linear(hidden, output_hidden)
-        self.prefix_length = 2
-
-    def forward(self, user_id, item_id):
-        user_vec = self.mlp_u(self.user_embedding(user_id)).unsqueeze(1)
-        item_vec = self.mlp_v(self.item_embedding(item_id)).unsqueeze(1)
-        return user_vec, item_vec
-
-
 class GraphEvidenceCIER(nn.Module):
-    """Profile-aware Qwen explainer with graph evidence selector and graph UL."""
+    """Profile-aware Qwen explainer with graph selector UL (no evidence prompt text)."""
 
     def __init__(
         self,
-        user_num,
-        item_num,
-        hidden,
-        llm_hidden,
         tokenizer,
         vocab_size,
         evidence_selector: EvidenceSelector,
@@ -58,9 +37,6 @@ class GraphEvidenceCIER(nn.Module):
         special_token_ids=(0, 1, 2),
     ):
         super().__init__()
-        self.collaborative_encoder = CollaborativeEncoder(
-            user_num, item_num, hidden=hidden, output_hidden=llm_hidden,
-        )
         self.evidence_selector = evidence_selector
         self.model = None
         self.tokenizer = tokenizer
@@ -73,15 +49,6 @@ class GraphEvidenceCIER(nn.Module):
         self.eos_token_ids = tuple(int(x) for x in (eos_token_ids or ()))
         self.special_token_ids = tuple(int(x) for x in special_token_ids)
         self.reset_parameters()
-
-    @property
-    def prompt_encoder(self):
-        """Backward-compatible alias for checkpoint loading."""
-        return self.collaborative_encoder
-
-    @prompt_encoder.setter
-    def prompt_encoder(self, value):
-        self.collaborative_encoder = value
 
     def reset_parameters(self):
         for p in self.parameters():
@@ -138,13 +105,9 @@ class GraphEvidenceCIER(nn.Module):
     def get_embedding(
         self,
         input_ids=None,
-        user_id=None,
-        item_id=None,
         profile_ids=None,
         target_item_ids=None,
-        evidence_prompt_ids=None,
         generation_prompt_ids=None,
-        include_collaborative=True,
     ):
         embeddings = self._embed_tokens()
         llm_dtype = embeddings.weight.dtype
@@ -154,12 +117,6 @@ class GraphEvidenceCIER(nn.Module):
             parts.append(embeddings(profile_ids.to(llm_device)).to(dtype=llm_dtype))
         if target_item_ids is not None and target_item_ids.numel() > 0:
             parts.append(embeddings(target_item_ids.to(llm_device)).to(dtype=llm_dtype))
-        if evidence_prompt_ids is not None and evidence_prompt_ids.numel() > 0:
-            parts.append(embeddings(evidence_prompt_ids.to(llm_device)).to(dtype=llm_dtype))
-        if include_collaborative and user_id is not None and item_id is not None:
-            user_vec, item_vec = self.collaborative_encoder(user_id, item_id)
-            parts.append(user_vec.to(device=llm_device, dtype=llm_dtype))
-            parts.append(item_vec.to(device=llm_device, dtype=llm_dtype))
         if generation_prompt_ids is not None and generation_prompt_ids.numel() > 0:
             parts.append(embeddings(generation_prompt_ids.to(llm_device)).to(dtype=llm_dtype))
         if input_ids is not None and input_ids.shape[1] > 0:
@@ -173,24 +130,15 @@ class GraphEvidenceCIER(nn.Module):
         input_ids=None,
         profile_mask=None,
         target_item_mask=None,
-        evidence_prompt_mask=None,
         generation_prompt_mask=None,
         batch_size=None,
         device=None,
-        include_collaborative=True,
     ):
         masks = []
         if profile_mask is not None and profile_mask.numel() > 0:
             masks.append(profile_mask.to(device))
         if target_item_mask is not None and target_item_mask.numel() > 0:
             masks.append(target_item_mask.to(device))
-        if evidence_prompt_mask is not None and evidence_prompt_mask.numel() > 0:
-            masks.append(evidence_prompt_mask.to(device))
-        if include_collaborative:
-            masks.append(torch.ones(
-                batch_size, self.collaborative_encoder.prefix_length,
-                dtype=torch.long, device=device,
-            ))
         if generation_prompt_mask is not None and generation_prompt_mask.numel() > 0:
             masks.append(generation_prompt_mask.to(device))
         if input_ids is not None and input_ids.shape[1] > 0:
@@ -201,19 +149,13 @@ class GraphEvidenceCIER(nn.Module):
         self,
         profile_ids=None,
         target_item_ids=None,
-        evidence_prompt_ids=None,
         generation_prompt_ids=None,
-        include_collaborative=True,
     ):
         total = 0
         if profile_ids is not None:
             total += profile_ids.shape[1]
         if target_item_ids is not None:
             total += target_item_ids.shape[1]
-        if evidence_prompt_ids is not None:
-            total += evidence_prompt_ids.shape[1]
-        if include_collaborative:
-            total += self.collaborative_encoder.prefix_length
         if generation_prompt_ids is not None:
             total += generation_prompt_ids.shape[1]
         return total
@@ -303,14 +245,10 @@ class GraphEvidenceCIER(nn.Module):
     def train_step(
         self,
         input_ids,
-        user_id=None,
-        item_id=None,
         profile_ids=None,
         profile_mask=None,
         target_item_ids=None,
         target_item_mask=None,
-        evidence_prompt_ids=None,
-        evidence_prompt_mask=None,
         generation_prompt_ids=None,
         generation_prompt_mask=None,
         neg_token_ids=None,
@@ -324,21 +262,19 @@ class GraphEvidenceCIER(nn.Module):
     ):
         inputs_embeds = self.get_embedding(
             input_ids=input_ids,
-            user_id=user_id,
-            item_id=item_id,
             profile_ids=profile_ids,
             target_item_ids=target_item_ids,
-            evidence_prompt_ids=evidence_prompt_ids,
             generation_prompt_ids=generation_prompt_ids,
         )
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
         attention_mask = self._attention_mask(
             input_ids=input_ids,
             profile_mask=profile_mask,
             target_item_mask=target_item_mask,
-            evidence_prompt_mask=evidence_prompt_mask,
             generation_prompt_mask=generation_prompt_mask,
-            batch_size=user_id.shape[0],
-            device=user_id.device,
+            batch_size=batch_size,
+            device=device,
         )
         logits_to_keep = input_ids.shape[1] + 1
         try:
@@ -364,7 +300,6 @@ class GraphEvidenceCIER(nn.Module):
             prompt_len = self._prompt_length(
                 profile_ids,
                 target_item_ids,
-                evidence_prompt_ids,
                 generation_prompt_ids,
             )
             gen_logits = logits[:, prompt_len - 1:-1, :]
@@ -414,40 +349,29 @@ class GraphEvidenceCIER(nn.Module):
     def forward(
         self,
         input_ids=None,
-        user_id=None,
-        item_id=None,
         profile_ids=None,
         profile_mask=None,
         target_item_ids=None,
         target_item_mask=None,
-        evidence_prompt_ids=None,
-        evidence_prompt_mask=None,
         generation_prompt_ids=None,
         generation_prompt_mask=None,
         attention_mask=None,
         kv_cache=None,
-        include_collaborative=True,
     ):
         if kv_cache is None:
             inputs_embeds = self.get_embedding(
                 input_ids=input_ids,
-                user_id=user_id,
-                item_id=item_id,
                 profile_ids=profile_ids,
                 target_item_ids=target_item_ids,
-                evidence_prompt_ids=evidence_prompt_ids,
                 generation_prompt_ids=generation_prompt_ids,
-                include_collaborative=include_collaborative,
             )
             attention_mask = self._attention_mask(
                 input_ids=input_ids,
                 profile_mask=profile_mask,
                 target_item_mask=target_item_mask,
-                evidence_prompt_mask=evidence_prompt_mask,
                 generation_prompt_mask=generation_prompt_mask,
-                batch_size=user_id.shape[0],
-                device=user_id.device,
-                include_collaborative=include_collaborative,
+                batch_size=input_ids.shape[0] if input_ids is not None else profile_ids.shape[0],
+                device=inputs_embeds.device,
             )
             output = self.model(
                 inputs_embeds=inputs_embeds,
@@ -488,20 +412,37 @@ class GraphEvidenceCIER(nn.Module):
                         logits[batch_idx, :, token_id] += self.evidence_bonus
         return logits
 
-    def _apply_repetition_controls(self, logits, generated_ids):
-        max_repeat = self.max_consecutive_token_repeat
-        if max_repeat <= 0 or generated_ids is None or generated_ids.shape[1] == 0:
-            return logits
-        floor = -1e4
-        for batch_idx in range(logits.shape[0]):
-            last_id = int(generated_ids[batch_idx, -1].item())
+    def _repetition_run_length(self, generated_ids):
+        if generated_ids is None or generated_ids.shape[1] == 0:
+            batch = generated_ids.shape[0] if generated_ids is not None else 0
+            return (
+                torch.full((batch,), -1, dtype=torch.long, device=generated_ids.device),
+                torch.zeros(batch, dtype=torch.long, device=generated_ids.device),
+            )
+        last_ids = generated_ids[:, -1]
+        run_lens = torch.ones(generated_ids.shape[0], dtype=torch.long, device=generated_ids.device)
+        for batch_idx in range(generated_ids.shape[0]):
+            last_id = int(last_ids[batch_idx].item())
             run = 0
             for token_id in reversed(generated_ids[batch_idx].tolist()):
                 if int(token_id) != last_id:
                     break
                 run += 1
-            if run >= max_repeat and last_id >= 0:
-                logits[batch_idx, last_id] = floor
+            run_lens[batch_idx] = run
+        return last_ids, run_lens
+
+    def _apply_repetition_controls(self, logits, generated_ids=None, last_ids=None, run_lens=None):
+        max_repeat = self.max_consecutive_token_repeat
+        if max_repeat <= 0:
+            return logits
+        floor = -1e4
+        if generated_ids is not None and generated_ids.shape[1] > 0:
+            if last_ids is None or run_lens is None:
+                last_ids, run_lens = self._repetition_run_length(generated_ids)
+            for batch_idx in range(logits.shape[0]):
+                last_id = int(last_ids[batch_idx].item())
+                if int(run_lens[batch_idx].item()) >= max_repeat and last_id >= 0:
+                    logits[batch_idx, last_id] = floor
         return logits
 
     def _apply_generation_controls(
@@ -510,22 +451,25 @@ class GraphEvidenceCIER(nn.Module):
         evidence_token_ids=None,
         evidence_token_mask=None,
         generated_ids=None,
+        last_ids=None,
+        run_lens=None,
     ):
         logits = self._apply_evidence_bonus(logits, evidence_token_ids, evidence_token_mask)
-        logits = self._apply_repetition_controls(logits, generated_ids)
+        logits = self._apply_repetition_controls(
+            logits,
+            generated_ids=generated_ids,
+            last_ids=last_ids,
+            run_lens=run_lens,
+        )
         return logits
 
     @torch.no_grad()
     def greedy_generate(
         self,
-        user_id,
-        item_id,
         profile_ids,
         profile_mask,
         target_item_ids,
         target_item_mask,
-        evidence_prompt_ids,
-        evidence_prompt_mask,
         generation_prompt_ids,
         generation_prompt_mask,
         word,
@@ -540,19 +484,14 @@ class GraphEvidenceCIER(nn.Module):
         for _ in range(word):
             logits, kv_cache, attention_mask = self.forward(
                 input_ids=last_words,
-                user_id=user_id,
-                item_id=item_id,
                 profile_ids=profile_ids if kv_cache is None else None,
                 profile_mask=profile_mask if kv_cache is None else None,
                 target_item_ids=target_item_ids if kv_cache is None else None,
                 target_item_mask=target_item_mask if kv_cache is None else None,
-                evidence_prompt_ids=evidence_prompt_ids if kv_cache is None else None,
-                evidence_prompt_mask=evidence_prompt_mask if kv_cache is None else None,
                 generation_prompt_ids=generation_prompt_ids if kv_cache is None else None,
                 generation_prompt_mask=generation_prompt_mask if kv_cache is None else None,
                 attention_mask=attention_mask,
                 kv_cache=kv_cache,
-                include_collaborative=(kv_cache is None),
             )
             logits = self._apply_generation_controls(
                 logits,
