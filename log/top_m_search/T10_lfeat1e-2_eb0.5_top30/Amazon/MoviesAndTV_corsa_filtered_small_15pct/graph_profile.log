@@ -1,0 +1,84 @@
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_ul:0.1 lambda_feat:0.01 top_m_evidence:30 ul_candidate_k:20
+ul_start_epoch:1 evidence_bonus:0.5 max_consecutive_token_repeat:3
+feature_loss: enabled via lambda_feat * feat on matched target positions, gated by ul_start_epoch=1
+devices:1 primary_device:cuda:1 embedding_device:cuda:1
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=1 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:1:1
+Train Epoch: 0 Loss: 3.872457	NLL: 3.872457	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.47, peak allocated/reserved=26.03/26.47
+Train Epoch: 0 Loss: 3.326034	NLL: 3.326034	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.47, peak allocated/reserved=26.03/26.47
+Train Epoch: 0 Loss: 3.270516	NLL: 3.270516	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.53, peak allocated/reserved=26.07/26.53
+Train Epoch: 0 Loss: 3.252859	NLL: 3.252859	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.77, peak allocated/reserved=26.30/26.77
+Train Epoch: 0 Loss: 3.237406	NLL: 3.237406	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.77, peak allocated/reserved=26.30/26.77
+Train Epoch: 0 Loss: 3.246281	NLL: 3.246281	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.81, peak allocated/reserved=26.39/26.81
+Train Epoch: 0 Loss: 3.234378	NLL: 3.234378	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.81, peak allocated/reserved=26.39/26.81
+Train Epoch: 0 Loss: 3.460149	NLL: 3.460149	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.81, peak allocated/reserved=26.39/26.81
+valid Loss: 3.8706403403477156
+
+save model
+Train Epoch: 1 Loss: 4.277038	NLL: 4.237561	GraphUL: 0.003698	Feat: 3.910728	CUDA memory cuda:1 GiB current allocated/reserved=8.79/26.87, peak allocated/reserved=26.42/26.87
+Train Epoch: 1 Loss: 4.609148	NLL: 4.567196	GraphUL: 0.003778	Feat: 4.157459	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.04, peak allocated/reserved=26.56/27.04
+Train Epoch: 1 Loss: 4.627674	NLL: 4.585534	GraphUL: 0.003707	Feat: 4.176914	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.04, peak allocated/reserved=26.56/27.04
+Train Epoch: 1 Loss: 4.696870	NLL: 4.653651	GraphUL: 0.003596	Feat: 4.285946	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.08, peak allocated/reserved=26.65/27.08
+Train Epoch: 1 Loss: 4.806816	NLL: 4.762620	GraphUL: 0.003738	Feat: 4.382201	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.08, peak allocated/reserved=26.65/27.08
+Train Epoch: 1 Loss: 4.837651	NLL: 4.791944	GraphUL: 0.003686	Feat: 4.533883	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.08, peak allocated/reserved=26.65/27.08
+Train Epoch: 1 Loss: 4.819169	NLL: 4.774158	GraphUL: 0.003572	Feat: 4.465315	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.08, peak allocated/reserved=26.65/27.08
+Train Epoch: 1 Loss: 4.825631	NLL: 4.780602	GraphUL: 0.003439	Feat: 4.468507	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.69/27.14
+valid Loss: 4.905689502737336
+
+Train Epoch: 2 Loss: 5.016160	NLL: 4.969438	GraphUL: 0.003327	Feat: 4.638858	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.38/27.14
+Train Epoch: 2 Loss: 5.242271	NLL: 5.193384	GraphUL: 0.003246	Feat: 4.856277	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.56/27.14
+Train Epoch: 2 Loss: 5.421754	NLL: 5.371759	GraphUL: 0.002968	Feat: 4.969897	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.60/27.14
+Train Epoch: 2 Loss: 5.495691	NLL: 5.446242	GraphUL: 0.002983	Feat: 4.915057	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.60/27.14
+Train Epoch: 2 Loss: 5.547871	NLL: 5.497597	GraphUL: 0.002712	Feat: 5.000253	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.60/27.14
+Train Epoch: 2 Loss: 5.673134	NLL: 5.622503	GraphUL: 0.002781	Feat: 5.035255	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.60/27.14
+Train Epoch: 2 Loss: 5.521216	NLL: 5.470954	GraphUL: 0.003329	Feat: 4.992905	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.60/27.14
+Train Epoch: 2 Loss: 5.449100	NLL: 5.399914	GraphUL: 0.003362	Feat: 4.884927	CUDA memory cuda:1 GiB current allocated/reserved=8.79/27.14, peak allocated/reserved=26.60/27.14
+valid Loss: 5.528942089541694
+
+eval_group: all | samples: 4299 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1  6.3198
+BLEU-4  0.0901
+USR  0.9970 | USN    4286
+Distinct-1  0.8199
+Distinct-2  0.9458
+ENTR 11.2254
+DIV  0.4968
+FCR  0.4588
+FMR  0.1286
+rouge_1 15.5147
+rouge_2  1.1196
+rouge_l  5.5699
+eval_group: low | samples: 859 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1  4.5047
+BLEU-4  0.0000
+USR  1.0000 | USN     859
+Distinct-1  0.8173
+Distinct-2  0.9442
+ENTR 10.6081
+DIV  0.4493
+FCR  0.5656
+FMR  0.1769
+rouge_1 17.6127
+rouge_2  1.5703
+rouge_l  4.1809
+eval_group: high | samples: 859 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1  7.2106
+BLEU-4  0.0000
+USR  0.9977 | USN     857
+Distinct-1  0.8233
+Distinct-2  0.9479
+ENTR 10.5771
+DIV  0.4705
+FCR  0.3015
+FMR  0.1048
+rouge_1 14.5317
+rouge_2  0.8979
+rouge_l  6.3057
