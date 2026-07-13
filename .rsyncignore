@@ -1,0 +1,26 @@
+# Python 虚拟环境
+.venv/
+venv/
+env/
+site-packages/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Mac 文件
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# 本地配置和密钥
+.env
+.env.*
+*.pem
+*.key

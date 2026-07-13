@@ -1,5 +1,5 @@
---extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cu128
-torch==2.7.1+cu128
+# macOS 没有 NVIDIA CUDA wheel；此版本支持 Apple Silicon 的 MPS，以及 CPU 回退。
+torch==2.7.1
 transformers==4.57.6
 peft==0.19.1
 accelerate==1.13.0
