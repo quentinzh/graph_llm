@@ -1,0 +1,15 @@
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_ul:0.1 lambda_feat:0.01 top_m_evidence:5 ul_candidate_k:20
+ul_start_epoch:1 evidence_bonus:0.0 max_consecutive_token_repeat:3
+feature_loss: enabled via lambda_feat * feat on matched target positions, gated by ul_start_epoch=1
+devices:1 primary_device:cuda:1 embedding_device:cuda:1
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=1 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:1:1
+decode_config: strategy=sample num_beams=4 num_return_sequences=4 temperature=0.8 top_p=0.9 beam_length_penalty=0.8 prototype_k=3 rerank_logprob_delta=0.5 use_rerank=True

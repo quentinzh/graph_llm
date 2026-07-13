@@ -68,7 +68,6 @@ from graph_llm.metrics.metrics import (
     rouge_score,
     unique_sentence_percent,
 )
-from graph_llm.metrics.rerank import RerankWeights, rerank_batch
 from graph_llm.models.model import GraphEvidenceCIER, build_selector_outputs
 from graph_llm.models.selector import EvidenceSelector
 
@@ -1091,28 +1090,6 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
     model.eval()
     predict, label = [], []
     max_batches = int(getattr(args, "max_eval_batches", 0) or 0)
-    decode_strategy = getattr(args, "decode_strategy", "greedy")
-    use_rerank = bool(getattr(args, "use_rerank", False))
-    write_log(
-        log_name,
-        "decode_config: "
-        f"strategy={decode_strategy} "
-        f"num_beams={getattr(args, 'num_beams', 4)} "
-        f"num_return_sequences={getattr(args, 'num_return_sequences', 4)} "
-        f"use_rerank={use_rerank}",
-    )
-    rerank_weights = RerankWeights(
-        logprob=float(getattr(args, "rerank_w_logprob", 1.0)),
-        feature_match=float(getattr(args, "rerank_w_feature", 0.8)),
-        evidence_coverage=float(getattr(args, "rerank_w_evidence", 0.5)),
-        repetition=float(getattr(args, "rerank_w_repetition", 0.7)),
-        generic=float(getattr(args, "rerank_w_generic", 0.5)),
-    )
-    pad_id = tokenizer_pad_id(tokenizer)
-    eos_ids = tokenizer_eos_ids(tokenizer)
-    skip_ids = tokenizer_skip_ids(tokenizer)
-    sample_offset = 0
-
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Test generate")):
             (
@@ -1140,56 +1117,20 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 args,
                 device,
             )
-            batch_size = profile_ids.shape[0]
-            keyword_words_batch = [
-                dataset.features[sample_offset + sample_idx]
-                for sample_idx in range(batch_size)
-            ]
-
-            if decode_strategy == "beam":
-                batch_candidates, batch_logprobs = model.beam_generate(
-                    profile_ids,
-                    profile_mask,
-                    target_item_ids,
-                    target_item_mask,
-                    generation_prompt_ids,
-                    generation_prompt_mask,
-                    word,
-                    device,
-                    num_beams=getattr(args, "num_beams", 4),
-                    num_return_sequences=getattr(args, "num_return_sequences", 4),
-                    evidence_token_ids=evidence_token_ids,
-                    evidence_token_mask=evidence_token_mask,
-                )
-                generated = rerank_batch(
-                    batch_candidates,
-                    batch_logprobs,
-                    keyword_words_batch,
-                    tokenizer,
-                    evidence_token_ids=evidence_token_ids,
-                    evidence_token_mask=evidence_token_mask,
-                    use_rerank=use_rerank,
-                    pad_token_id=pad_id,
-                    eos_token_ids=eos_ids,
-                    skip_token_ids=skip_ids,
-                    weights=rerank_weights,
-                )
-            else:
-                generated = model.greedy_generate(
-                    profile_ids,
-                    profile_mask,
-                    target_item_ids,
-                    target_item_mask,
-                    generation_prompt_ids,
-                    generation_prompt_mask,
-                    word,
-                    device,
-                    evidence_token_ids=evidence_token_ids,
-                    evidence_token_mask=evidence_token_mask,
-                )
+            generated = model.greedy_generate(
+                profile_ids,
+                profile_mask,
+                target_item_ids,
+                target_item_mask,
+                generation_prompt_ids,
+                generation_prompt_mask,
+                word,
+                device,
+                evidence_token_ids=evidence_token_ids,
+                evidence_token_mask=evidence_token_mask,
+            )
             predict.extend(generated)
             label.extend(input_ids.tolist())
-            sample_offset += batch_size
             if max_batches and (batch_idx + 1) >= max_batches:
                 print(f"Stopping test early after {max_batches} batches (--max_eval_batches).")
                 break

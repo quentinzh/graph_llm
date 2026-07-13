@@ -305,30 +305,4 @@ def build_arg_parser():
         type=str,
     )
     parser.add_argument("--log_name", default="graph_profile.log", type=str)
-    parser.add_argument(
-        "--decode_strategy",
-        default="greedy",
-        choices=["greedy", "beam"],
-        help="Test-time decoding strategy.",
-    )
-    parser.add_argument("--num_beams", default=4, type=int)
-    parser.add_argument("--num_return_sequences", default=4, type=int)
-    parser.add_argument(
-        "--use_rerank",
-        dest="use_rerank",
-        action="store_true",
-        default=False,
-        help="Rerank beam candidates with metric-aware score.",
-    )
-    parser.add_argument(
-        "--no_rerank",
-        dest="use_rerank",
-        action="store_false",
-        help="Disable metric-aware rerank for beam decoding.",
-    )
-    parser.add_argument("--rerank_w_logprob", default=1.0, type=float)
-    parser.add_argument("--rerank_w_feature", default=0.8, type=float)
-    parser.add_argument("--rerank_w_evidence", default=0.5, type=float)
-    parser.add_argument("--rerank_w_repetition", default=0.7, type=float)
-    parser.add_argument("--rerank_w_generic", default=0.5, type=float)
     return parser

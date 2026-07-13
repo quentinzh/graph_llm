@@ -33,7 +33,6 @@ from graph_llm.aux.prompt_utils import (
 )
 from graph_llm.dataload.dataloader import GraphCollater
 from graph_llm.metrics.metrics import bleu_score, rouge_score
-from graph_llm.metrics.rerank import rerank_candidates, score_candidate, select_best_by_logprob
 from graph_llm.models.selector import EvidenceSelector, pad_token_matrix
 from graph_llm.models.token_graph import (
     ReviewRecord,
@@ -645,65 +644,6 @@ def test_standalone_metrics_available():
     assert bleu_score(references, generated, n_gram=1) > 0.0
     scores = rouge_score(["great movie"], ["great story"])
     assert {"rouge_1", "rouge_2", "rouge_l"}.issubset(scores)
-
-
-class _RerankTokenizer:
-    """将固定 token id 映射为可读词，供 rerank 单测使用。"""
-
-    def decode(self, ids):
-        mapping = {
-            10: "great",
-            11: "acting",
-            12: "good",
-            13: "movie",
-            14: "story",
-        }
-        return " ".join(mapping.get(int(token_id), "x") for token_id in ids)
-
-
-def test_rerank_prefers_feature_and_evidence_candidate():
-    tokenizer = _RerankTokenizer()
-    candidates = [
-        [12, 13],  # good movie，logprob 更高但泛化
-        [10, 11],  # great acting，更贴合 feature/evidence
-    ]
-    logprobs = [0.9, 0.2]
-    evidence_ids = torch.tensor([10, 11])
-    evidence_mask = torch.tensor([True, True])
-    chosen = rerank_candidates(
-        candidates,
-        logprobs,
-        keyword_words="acting",
-        tokenizer=tokenizer,
-        evidence_token_ids=evidence_ids,
-        evidence_token_mask=evidence_mask,
-    )
-    assert chosen == [10, 11]
-
-
-def test_select_best_by_logprob_without_rerank():
-    candidates = [[1, 2], [3, 4]]
-    logprobs = [0.1, 0.8]
-    assert select_best_by_logprob(candidates, logprobs) == [3, 4]
-
-
-def test_score_candidate_penalizes_generic_phrase():
-    tokenizer = _RerankTokenizer()
-    generic_score = score_candidate(
-        [12, 13],
-        "acting",
-        normalized_logprob=0.8,
-        tokenizer=tokenizer,
-    )
-    specific_score = score_candidate(
-        [10, 11],
-        "acting",
-        normalized_logprob=0.8,
-        tokenizer=tokenizer,
-        evidence_token_ids=torch.tensor([10, 11]),
-        evidence_token_mask=torch.tensor([True, True]),
-    )
-    assert specific_score > generic_score
 
 
 def test_derive_profiles_from_parent_subset():
