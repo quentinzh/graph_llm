@@ -7,7 +7,6 @@ from graph_llm.models.token_graph import (
     UserTokenGraph,
     batch_graphs,
     build_sample_token_graph,
-    select_high_frequency_negatives,
 )
 
 __all__ = [
@@ -19,5 +18,4 @@ __all__ = [
     "build_sample_token_graph",
     "build_selector_outputs",
     "pad_token_matrix",
-    "select_high_frequency_negatives",
 ]

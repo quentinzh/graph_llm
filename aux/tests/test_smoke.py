@@ -32,6 +32,7 @@ from graph_llm.aux.prompt_utils import (
     tokenize_text_list,
 )
 from graph_llm.dataload.dataloader import GraphCollater
+from graph_llm.dataload.tail_stats import TailTokenStats, build_tail_token_stats
 from graph_llm.metrics.metrics import bleu_score, rouge_score
 from graph_llm.models.selector import EvidenceSelector, pad_token_matrix
 from graph_llm.models.token_graph import (
@@ -39,7 +40,6 @@ from graph_llm.models.token_graph import (
     UserTokenGraph,
     batch_graphs,
     build_sample_token_graph,
-    select_high_frequency_negatives,
 )
 from graph_llm.models.model import GraphEvidenceCIER
 from graph_llm.config import (
@@ -75,7 +75,6 @@ def _make_model(tokenizer, **kwargs):
         tokenizer=tokenizer,
         vocab_size=32,
         evidence_selector=EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1),
-        lambda_ul=0.1,
         lambda_feat=0.0,
         evidence_bonus=0.0,
         pad_token_id=0,
@@ -157,6 +156,24 @@ class FixedFullLogitLM(torch.nn.Module):
         return {"logits": logits}
 
 
+class TrainableTinyLM(torch.nn.Module):
+    """Small causal-LM stand-in used by the two-batch CPU training smoke test."""
+
+    def __init__(self, vocab_size=32, hidden_size=8):
+        super().__init__()
+        self.embedding = torch.nn.Embedding(vocab_size, hidden_size)
+        self.lm_head = torch.nn.Linear(hidden_size, vocab_size)
+
+    def get_input_embeddings(self):
+        return self.embedding
+
+    def forward(self, inputs_embeds=None, attention_mask=None, use_cache=False, logits_to_keep=None, **_kwargs):
+        # 补一个末位置，使 GraphEvidenceCIER 能对每个 target token 计算 NLL。
+        last_state = inputs_embeds[:, -1:, :]
+        hidden = torch.cat([inputs_embeds, last_state], dim=1)
+        return {"logits": self.lm_head(hidden)}
+
+
 def test_directed_edges_and_leakage():
     skip = {0, 1, 2}
     history = [
@@ -195,45 +212,43 @@ def test_selector_shapes():
         out_degree=np.array([1.0, 1.0, 0.0], dtype=np.float32),
     )
     selector = EvidenceSelector(embed_dim=8, hidden_dim=16, gnn_layers=2)
+    assert selector.input_proj[0].in_features == 8
     node_emb = torch.randn(graph.num_nodes, 8)
     item_emb = torch.randn(8)
-    scores = selector.forward_single(graph, node_emb, item_emb, num_reviews=3.0)
+    scores = selector.forward_single(graph, node_emb, item_emb)
     assert scores.shape == (graph.num_nodes,)
-    selected = selector.select_evidence_and_negatives(
-        scores, graph, top_m=2, ul_candidate_k=2, protected_token_ids={0, 1, 2},
-    )
-    assert selected["evidence_token_ids"].size == 2
-    assert selected["neg_token_ids"].size <= 2
-    evidence_set = set(selected["evidence_token_ids"].tolist())
-    neg_set = set(selected["neg_token_ids"].tolist())
-    assert evidence_set.isdisjoint(neg_set)
+    selected = selector.select_evidence(scores, graph, top_m=2)
+    assert selected.numel() == 2
 
 
-def test_ul_masking():
+def test_tail_stats_and_selector_bce():
     tokenizer = DummyTokenizer()
-    model = _make_model(tokenizer)
-
-    gen_logits = torch.zeros(1, 2, 32)
-    gen_logits[0, 0, 10] = 3.0
-    gen_logits[0, 0, 11] = 2.0
-    gen_logits[0, 1, 13] = 3.0
-    targets = torch.tensor([[10, 13]], dtype=torch.long)
-    valid_mask = torch.ones(1, 2, dtype=torch.long)
-    evidence_token_ids, evidence_token_mask = pad_token_matrix([[10]], pad_value=-1)
-    neg_token_ids, neg_token_mask = pad_token_matrix([[11]], pad_value=-1)
-    neg_weights, _ = pad_token_matrix([[1.0]], pad_value=0.0, dtype=torch.float32)
-
-    ul = model._graph_unlikelihood_loss(
-        gen_logits,
-        targets,
-        valid_mask,
-        neg_token_ids,
-        neg_token_mask,
-        evidence_token_ids,
-        evidence_token_mask,
-        neg_weights,
+    stats = build_tail_token_stats(
+        [[10, 11, 2], [10, 13, 2], [10, 11, 2]],
+        tokenizer=tokenizer,
+        ignored_token_ids={0, 1, 2},
+        weight_min=0.5,
+        weight_max=2.0,
     )
-    assert ul.item() > 0.0
+    assert stats.document_frequency(10) == 3
+    assert stats.tail_weight(13) >= stats.tail_weight(10)
+
+    graph = UserTokenGraph(
+        node_token_ids=np.array([10, 11, 13], dtype=np.int64),
+        node_surfaces=["great", "movie", "story"],
+        node_counts=np.array([3.0, 2.0, 1.0], dtype=np.float32),
+        node_doc_freq=np.array([3.0, 2.0, 1.0], dtype=np.float32),
+        edge_index=np.array([[0, 1], [1, 2]], dtype=np.int64),
+        edge_weight=np.array([1.0, 1.0], dtype=np.float32),
+        in_degree=np.array([0.0, 1.0, 1.0], dtype=np.float32),
+        out_degree=np.array([1.0, 1.0, 0.0], dtype=np.float32),
+    )
+    selector = EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1)
+    scores = selector.forward_single(graph, torch.randn(3, 4), torch.randn(4))
+    loss = selector.sampled_bce_loss(scores, graph, {13}, stats)
+    loss.backward()
+    assert loss.item() > 0.0
+    assert any(param.grad is not None for param in selector.parameters())
 
 
 def test_prompt_text_includes_title_and_user_id():
@@ -272,7 +287,7 @@ def test_prompt_length_accounts_for_new_segments():
 
 def test_generation_controls_filter_evidence_and_block_repeats():
     tokenizer = DummyTokenizer()
-    model = _make_model(tokenizer, lambda_ul=0.1, evidence_bonus=0.5, max_consecutive_token_repeat=2)
+    model = _make_model(tokenizer, evidence_bonus=0.5, max_consecutive_token_repeat=2)
     logits = torch.zeros(1, 32)
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10, 15, 16, 17]], pad_value=-1)
     adjusted = model._apply_evidence_bonus(logits.clone(), evidence_token_ids, evidence_token_mask)
@@ -297,26 +312,64 @@ def test_train_step_uses_adjusted_logits_nll():
     model = _make_model(
         tokenizer,
         evidence_selector=selector,
-        lambda_ul=0.0,
         evidence_bonus=0.0,
     )
     model.model = FixedLogitLM(logits=fixed_logits)
 
     input_ids = torch.tensor([[10, 11]])
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10]], pad_value=-1)
-    loss, nll, ul, feat = model.train_step(
+    loss, nll, feat = model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
-        apply_unlikelihood=False,
     )
 
     manual_log_probs = torch.log_softmax(fixed_logits[:2], dim=-1)
     manual_nll = -torch.stack([manual_log_probs[0, 10], manual_log_probs[1, 11]]).mean()
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(loss, manual_nll)
-    assert ul.item() == 0.0
     assert feat.item() == 0.0
+
+
+def test_train_step_uses_tail_weighted_sft():
+    tokenizer = DummyTokenizer()
+    fixed_logits = torch.zeros(3, 32)
+    fixed_logits[0, 10] = 1.5
+    fixed_logits[1, 11] = 0.5
+    model = _make_model(tokenizer, evidence_bonus=0.0)
+    model.model = FixedLogitLM(logits=fixed_logits)
+
+    input_ids = torch.tensor([[10, 11]])
+    tail_weights = torch.tensor([[2.0, 0.5]])
+    loss, nll, feat = model.train_step(input_ids, tail_position_weights=tail_weights)
+
+    log_probs = torch.log_softmax(fixed_logits[:2], dim=-1)
+    token_nll = torch.stack([-log_probs[0, 10], -log_probs[1, 11]])
+    expected = (token_nll * torch.tensor([2.0, 0.5])).sum() / 2.5
+    assert torch.allclose(nll, expected)
+    assert torch.allclose(loss, expected)
+    assert feat.item() == 0.0
+
+
+def test_two_batch_tail_sft_training_smoke():
+    """Run exactly two CPU batches to check the tail-weighted optimization path."""
+    tokenizer = DummyTokenizer()
+    model = _make_model(tokenizer, evidence_bonus=0.0)
+    model.model = TrainableTinyLM()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    batches = [
+        (torch.tensor([[10, 11]]), torch.tensor([[2.0, 0.5]])),
+        (torch.tensor([[11, 13]]), torch.tensor([[0.5, 2.0]])),
+    ]
+    for input_ids, tail_weights in batches:
+        optimizer.zero_grad()
+        loss, _nll, _feat = model.train_step(
+            input_ids,
+            tail_position_weights=tail_weights,
+        )
+        assert torch.isfinite(loss)
+        loss.backward()
+        optimizer.step()
 
 
 def test_train_step_masks_prompt_tokens_from_nll_targets():
@@ -330,7 +383,6 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     model = _make_model(
         tokenizer,
         evidence_selector=selector,
-        lambda_ul=0.0,
         evidence_bonus=0.0,
     )
 
@@ -346,7 +398,7 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     fixed_logits[prompt_len, 11] = 0.5
     model.model = FixedFullLogitLM(logits=fixed_logits)
 
-    loss, nll, ul, feat = model.train_step(
+    loss, nll, feat = model.train_step(
         input_ids,
         profile_ids=profile_ids,
         profile_mask=torch.ones_like(profile_ids),
@@ -354,7 +406,6 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
         target_item_mask=torch.ones_like(target_item_ids),
         generation_prompt_ids=generation_prompt_ids,
         generation_prompt_mask=torch.ones_like(generation_prompt_ids),
-        apply_unlikelihood=False,
     )
 
     response_logits = fixed_logits[prompt_len - 1:prompt_len + 1]
@@ -362,7 +413,6 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     manual_nll = -torch.stack([manual_log_probs[0, 10], manual_log_probs[1, 11]]).mean()
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(loss, manual_nll)
-    assert ul.item() == 0.0
     assert feat.item() == 0.0
 
 
@@ -378,23 +428,21 @@ def test_evidence_bonus_reduces_nll_for_gold_evidence_token():
     itemid = torch.tensor([1])
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10]], pad_value=-1)
 
-    no_bonus_model = _make_model(tokenizer, lambda_ul=0.0, evidence_bonus=0.0)
+    no_bonus_model = _make_model(tokenizer, evidence_bonus=0.0)
     no_bonus_model.model = FixedLogitLM(logits=fixed_logits)
 
-    bonus_model = _make_model(tokenizer, lambda_ul=0.0, evidence_bonus=0.5)
+    bonus_model = _make_model(tokenizer, evidence_bonus=0.5)
     bonus_model.model = FixedLogitLM(logits=fixed_logits)
 
-    _loss0, nll0, _ul0, _feat0 = no_bonus_model.train_step(
+    _loss0, nll0, _feat0 = no_bonus_model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
-        apply_unlikelihood=False,
     )
-    _loss_bonus, nll_bonus, _ul_bonus, _feat_bonus = bonus_model.train_step(
+    _loss_bonus, nll_bonus, _feat_bonus = bonus_model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
-        apply_unlikelihood=False,
     )
 
     adjusted = fixed_logits[:2].clone()
@@ -415,7 +463,6 @@ def test_feature_learning_loss_uses_matched_target_positions():
     model = _make_model(
         tokenizer,
         evidence_selector=selector,
-        lambda_ul=0.1,
         lambda_feat=0.5,
         evidence_bonus=0.0,
     )
@@ -425,11 +472,10 @@ def test_feature_learning_loss_uses_matched_target_positions():
     feature_position_mask = torch.tensor([[False, True]])
     feature_position_weights = torch.tensor([[0.0, 1.0]])
 
-    loss, nll, ul, feat = model.train_step(
+    loss, nll, feat = model.train_step(
         input_ids,
         feature_position_mask=feature_position_mask,
         feature_position_weights=feature_position_weights,
-        apply_unlikelihood=True,
     )
 
     manual_log_probs = torch.log_softmax(fixed_logits[:2], dim=-1)
@@ -437,8 +483,7 @@ def test_feature_learning_loss_uses_matched_target_positions():
     manual_feat = -manual_log_probs[1, 12]
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(feat, manual_feat)
-    assert torch.allclose(loss, manual_nll + 0.1 * ul + 0.5 * feat)
-    assert ul.item() == 0.0
+    assert torch.allclose(loss, manual_nll + 0.5 * feat)
 
 
 def test_batch_graphs():
@@ -459,25 +504,28 @@ def test_batch_graphs():
     assert batched["num_nodes_per_graph"].tolist() == [g1.num_nodes, g2.num_nodes]
 
 
-def test_high_frequency_negative_selection():
-    graph = UserTokenGraph(
-        node_token_ids=np.array([10, 11, 13], dtype=np.int64),
-        node_surfaces=["a", "b", "c"],
-        node_counts=np.array([5.0, 4.0, 1.0], dtype=np.float32),
-        node_doc_freq=np.array([2.0, 2.0, 1.0], dtype=np.float32),
-        edge_index=np.empty((2, 0), dtype=np.int64),
-        edge_weight=np.empty((0,), dtype=np.float32),
-        in_degree=np.zeros(3, dtype=np.float32),
-        out_degree=np.zeros(3, dtype=np.float32),
+def test_stratified_tail_node_selection():
+    stats = TailTokenStats(
+        doc_freq={10: 20, 11: 15, 13: 1, 14: 1},
+        num_documents=100,
+        reference_df=15.0,
+        tail_threshold=5,
     )
-    neg_nodes, neg_weights = select_high_frequency_negatives(
-        graph,
-        np.array([2], dtype=np.int64),
-        top_k=2,
-        protected_token_ids={0},
+    graph = build_sample_token_graph(
+        [ReviewRecord(1, "u", "a", (10, 10, 10, 11, 13, 14))],
+        exclude_row_key=-1,
+        target_raw_item="x",
+        skip_token_ids={0, 1, 2},
+        max_nodes=4,
+        tail_stats=stats,
+        target_item_token_ids={13},
+        content_token_filter=lambda token_id: token_id in {10, 11, 13, 14},
+        tail_node_quota=2,
+        relevance_node_quota=1,
+        preference_node_quota=1,
     )
-    assert 2 not in neg_nodes.tolist()
-    assert len(neg_nodes) <= 2
+    assert 13 in graph.node_token_ids.tolist()
+    assert 14 in graph.node_token_ids.tolist()
 
 
 def test_tokenize_text_list_padding():
@@ -858,27 +906,32 @@ def test_compute_batch_selector_tensors_moves_embeddings_to_primary():
         primary = torch.device("cpu")
 
     tokenizer = DummyTokenizer()
-    model = _make_model(tokenizer, lambda_ul=0.0)
+    model = _make_model(tokenizer)
     model.evidence_selector.to(primary)
     graph = UserTokenGraph(
-        node_token_ids=np.array([10, 11], dtype=np.int64),
-        node_surfaces=["great", "movie"],
-        node_counts=np.array([2.0, 1.0], dtype=np.float32),
-        node_doc_freq=np.array([1.0, 1.0], dtype=np.float32),
-        edge_index=np.array([[0], [1]], dtype=np.int64),
-        edge_weight=np.array([1.0], dtype=np.float32),
-        in_degree=np.array([0.0, 1.0], dtype=np.float32),
-        out_degree=np.array([1.0, 0.0], dtype=np.float32),
+        node_token_ids=np.array([10, 11, 13], dtype=np.int64),
+        node_surfaces=["great", "movie", "story"],
+        node_counts=np.array([2.0, 1.0, 1.0], dtype=np.float32),
+        node_doc_freq=np.array([1.0, 1.0, 1.0], dtype=np.float32),
+        edge_index=np.array([[0, 1], [1, 2]], dtype=np.int64),
+        edge_weight=np.array([1.0, 1.0], dtype=np.float32),
+        in_degree=np.array([0.0, 1.0, 1.0], dtype=np.float32),
+        out_degree=np.array([1.0, 1.0, 0.0], dtype=np.float32),
     )
     graph_tensors = {
-        "node_token_ids": torch.tensor([10, 11], dtype=torch.long),
+        "node_token_ids": torch.tensor([10, 11, 13], dtype=torch.long),
     }
     args = SimpleNamespace(
         special_token_ids="auto",
         top_m_evidence=1,
-        ul_candidate_k=1,
     )
-    evidence_token_ids, evidence_token_mask, neg_token_ids, neg_token_mask, neg_weights = (
+    tail_stats = TailTokenStats(
+        doc_freq={10: 2, 11: 5, 13: 1},
+        num_documents=5,
+        reference_df=5.0,
+        tail_threshold=5,
+    )
+    evidence_token_ids, evidence_token_mask, selector_loss = (
         compute_batch_selector_tensors(
             model,
             _StubEmbeddingEncoder(embed_device),
@@ -888,11 +941,14 @@ def test_compute_batch_selector_tensors_moves_embeddings_to_primary():
             tokenizer,
             args,
             primary,
+            input_ids=torch.tensor([[10, 11]], dtype=torch.long, device=primary),
+            tail_stats=tail_stats,
+            compute_selector_loss=True,
         )
     )
     assert evidence_token_ids.device == primary
-    assert neg_token_ids.device == primary
-    assert neg_weights.device == primary
+    assert selector_loss.device == primary
+    assert selector_loss.requires_grad
 
 
 def test_embedding_cache_corruption_recovery():
@@ -918,12 +974,14 @@ def test_embedding_cache_corruption_recovery():
 if __name__ == "__main__":
     test_directed_edges_and_leakage()
     test_selector_shapes()
-    test_ul_masking()
+    test_tail_stats_and_selector_bce()
     test_prompt_text_includes_title_and_user_id()
     test_prompt_length_accounts_for_new_segments()
     test_generation_controls_filter_evidence_and_block_repeats()
+    test_train_step_uses_tail_weighted_sft()
+    test_two_batch_tail_sft_training_smoke()
     test_batch_graphs()
-    test_high_frequency_negative_selection()
+    test_stratified_tail_node_selection()
     test_tokenize_text_list_padding()
     test_devices_parsing_dual_gpu()
     test_devices_arg_defaults()

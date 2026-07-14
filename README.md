@@ -1,6 +1,6 @@
 # Graph LLM Profile Explainer
 
-Profile-conditioned explainable recommendation with token-graph selector, graph UL loss, and Qwen3-4B LoRA SFT.
+Profile-conditioned explainable recommendation with a tail-aware token-graph selector and Qwen3-4B LoRA SFT.
 
 ## Project layout
 
@@ -21,10 +21,12 @@ graph_llm/
 
 ## Loss
 
-`total_loss = sft_loss + lambda_ul * graph_ul_loss + lambda_feat * feature_loss`
+`total_loss = tail_sft_loss + lambda_selector * selector_loss + lambda_feat * feature_loss`
 
-- GNN selector picks evidence tokens from per-user token graphs; UL loss suppresses unselected high-frequency tokens
-- Evidence tokens are **not** inserted as prompt text; they guide training via UL loss and `evidence_bonus` at generation
+- Tail-weighted SFT increases the contribution of low-frequency content tokens using training-fold statistics only
+- GNN selector is directly supervised by graph nodes that overlap with the gold explanation; sampled negatives include hard, frequency-matched, and globally popular nodes
+- Each graph keeps 512 stratified nodes by default: 256 tail, 128 item-related, and 128 stable user-preference nodes
+- Evidence tokens are **not** inserted as prompt text; the selector receives its own BCE supervision, while hard top-M evidence tokens receive the existing `evidence_bonus` during generation
 - `lambda_feat` encourages keyword feature tokens in explanations
 
 ## LLM Prompt Layout

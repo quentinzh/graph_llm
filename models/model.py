@@ -1,4 +1,4 @@
-"""Graph-guided explanation model with selector UL loss (no evidence text in prompt)."""
+"""Graph-guided explanation model with tail-aware SFT (no evidence text in prompt)."""
 
 from __future__ import annotations
 
@@ -21,14 +21,13 @@ CONTROL_STOPWORDS = {
 
 
 class GraphEvidenceCIER(nn.Module):
-    """Profile-aware Qwen explainer with graph selector UL (no evidence prompt text)."""
+    """Profile-aware Qwen explainer with graph evidence and tail-aware SFT."""
 
     def __init__(
         self,
         tokenizer,
         vocab_size,
         evidence_selector: EvidenceSelector,
-        lambda_ul=0.1,
         lambda_feat=0.0001,
         evidence_bonus=0.1,
         max_consecutive_token_repeat=3,
@@ -41,7 +40,6 @@ class GraphEvidenceCIER(nn.Module):
         self.model = None
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
-        self.lambda_ul = float(lambda_ul)
         self.lambda_feat = float(lambda_feat)
         self.evidence_bonus = float(evidence_bonus)
         self.max_consecutive_token_repeat = int(max_consecutive_token_repeat)
@@ -160,57 +158,6 @@ class GraphEvidenceCIER(nn.Module):
             total += generation_prompt_ids.shape[1]
         return total
 
-    def _graph_unlikelihood_loss(
-        self,
-        gen_logits,
-        targets,
-        valid_mask,
-        neg_token_ids,
-        neg_token_mask,
-        evidence_token_ids,
-        evidence_token_mask,
-        neg_token_weights,
-    ):
-        if neg_token_ids is None or neg_token_ids.numel() == 0:
-            return gen_logits.new_tensor(0.0)
-
-        probs = torch.softmax(gen_logits, dim=-1)
-        ignored = self._ignored_token_ids()
-        total = gen_logits.new_tensor(0.0)
-        count = 0
-
-        batch_size, seq_len, _ = gen_logits.shape
-        for b in range(batch_size):
-            neg_ids = neg_token_ids[b][neg_token_mask[b]]
-            if neg_ids.numel() == 0:
-                continue
-            evidence_ids = set(
-                evidence_token_ids[b][evidence_token_mask[b]].detach().cpu().tolist()
-            )
-            weights = neg_token_weights[b][neg_token_mask[b]].float()
-            for t in range(seq_len):
-                if valid_mask[b, t] <= 0:
-                    continue
-                target_id = int(targets[b, t].item())
-                step_probs = probs[b, t]
-                for j, neg_id in enumerate(neg_ids.tolist()):
-                    neg_id = int(neg_id)
-                    if (
-                        neg_id < 0
-                        or neg_id == target_id
-                        or neg_id in evidence_ids
-                        or neg_id in ignored
-                    ):
-                        continue
-                    p = step_probs[neg_id]
-                    w = weights[j] if j < weights.numel() else 1.0
-                    total = total + w * (-torch.log(torch.clamp(1.0 - p, min=1e-8)))
-                    count += 1
-
-        if count == 0:
-            return gen_logits.new_tensor(0.0)
-        return total / count
-
     def _feature_learning_loss(
         self,
         nll,
@@ -251,14 +198,11 @@ class GraphEvidenceCIER(nn.Module):
         target_item_mask=None,
         generation_prompt_ids=None,
         generation_prompt_mask=None,
-        neg_token_ids=None,
-        neg_token_mask=None,
         evidence_token_ids=None,
         evidence_token_mask=None,
-        neg_token_weights=None,
         feature_position_mask=None,
         feature_position_weights=None,
-        apply_unlikelihood=True,
+        tail_position_weights=None,
     ):
         inputs_embeds = self.get_embedding(
             input_ids=input_ids,
@@ -313,38 +257,32 @@ class GraphEvidenceCIER(nn.Module):
         )
         log_probs = torch.log_softmax(adjusted_logits.float(), dim=-1)
         nll = -log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-        nll_loss = (nll * valid_mask).sum() / valid_mask.sum().clamp_min(1)
-
-        if apply_unlikelihood:
-            if self.lambda_ul > 0:
-                ul_loss = self._graph_unlikelihood_loss(
-                    adjusted_logits,
-                    targets,
-                    valid_mask,
-                    neg_token_ids,
-                    neg_token_mask,
-                    evidence_token_ids,
-                    evidence_token_mask,
-                    neg_token_weights,
-                )
-            else:
-                ul_loss = gen_logits.new_tensor(0.0)
-
-            if self.lambda_feat > 0:
-                feat_loss = self._feature_learning_loss(
-                    nll,
-                    valid_mask,
-                    feature_position_mask,
-                    feature_position_weights,
-                )
-            else:
-                feat_loss = gen_logits.new_tensor(0.0)
+        if tail_position_weights is None:
+            sft_weights = valid_mask.to(dtype=nll.dtype)
         else:
-            ul_loss = gen_logits.new_tensor(0.0)
+            if tail_position_weights.shape != nll.shape:
+                raise ValueError(
+                    "tail_position_weights must match NLL shape, "
+                    f"got {tuple(tail_position_weights.shape)} vs {tuple(nll.shape)}"
+                )
+            sft_weights = (
+                tail_position_weights.to(device=nll.device, dtype=nll.dtype)
+                * valid_mask.to(dtype=nll.dtype)
+            )
+        nll_loss = (nll * sft_weights).sum() / sft_weights.sum().clamp_min(1.0)
+
+        if self.lambda_feat > 0:
+            feat_loss = self._feature_learning_loss(
+                nll,
+                valid_mask,
+                feature_position_mask,
+                feature_position_weights,
+            )
+        else:
             feat_loss = gen_logits.new_tensor(0.0)
 
-        total = nll_loss + self.lambda_ul * ul_loss + self.lambda_feat * feat_loss
-        return total, nll_loss.detach(), ul_loss.detach(), feat_loss.detach()
+        total = nll_loss + self.lambda_feat * feat_loss
+        return total, nll_loss.detach(), feat_loss.detach()
 
     def forward(
         self,
@@ -510,40 +448,21 @@ def build_selector_outputs(
     node_token_emb: torch.Tensor,
     item_embs: torch.Tensor,
     top_m: int,
-    ul_candidate_k: int,
-    protected_token_ids: set[int],
-    num_reviews_per_graph: list[float] | None = None,
 ):
     evidence_lists = []
-    neg_lists = []
-    weight_lists = []
+    utility_scores = []
     for batch_idx, graph in enumerate(graphs):
         if graph.num_nodes == 0:
             evidence_lists.append([])
-            neg_lists.append([])
-            weight_lists.append([])
+            utility_scores.append(torch.empty((0,), device=item_embs.device))
             continue
         start = sum(g.num_nodes for g in graphs[:batch_idx])
         end = start + graph.num_nodes
         node_emb = node_token_emb[start:end]
         item_emb = item_embs[batch_idx]
-        num_reviews = 1.0
-        if num_reviews_per_graph is not None:
-            num_reviews = float(num_reviews_per_graph[batch_idx])
-        utility = selector.forward_single(graph, node_emb, item_emb, num_reviews=num_reviews)
-        selected = selector.select_evidence_and_negatives(
-            utility,
-            graph,
-            top_m=top_m,
-            ul_candidate_k=ul_candidate_k,
-            protected_token_ids=protected_token_ids,
-        )
-        evidence_lists.append(selected["evidence_token_ids"])
-        neg_lists.append(selected["neg_token_ids"])
-        weight_lists.append(selected["neg_weights"])
+        utility = selector.forward_single(graph, node_emb, item_emb)
+        evidence_lists.append(selector.select_evidence(utility, graph, top_m=top_m).tolist())
+        utility_scores.append(utility)
 
     evidence_token_ids, evidence_token_mask = pad_token_matrix(evidence_lists)
-    neg_token_ids, neg_token_mask = pad_token_matrix(neg_lists)
-    neg_weights, neg_weight_mask = pad_token_matrix(weight_lists, pad_value=0.0, dtype=torch.float32)
-    neg_weights = neg_weights * neg_weight_mask.float()
-    return evidence_token_ids, evidence_token_mask, neg_token_ids, neg_token_mask, neg_weights
+    return evidence_token_ids, evidence_token_mask, utility_scores

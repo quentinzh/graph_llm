@@ -19,10 +19,27 @@ from graph_llm.models.token_graph import (
     build_sample_token_graph,
     extract_explanation_tokens,
 )
+from graph_llm.dataload.tail_stats import TailTokenStats, is_content_token
+from graph_llm.aux.prompt_utils import item_meta_from_row
 
 
-def _cache_version(max_nodes: int, min_token_count: int) -> str:
-    payload = f"v1|max_nodes={max_nodes}|min_token_count={min_token_count}"
+def _cache_version(
+    max_nodes: int,
+    min_token_count: int,
+    *,
+    tail_stats_fingerprint: str | None = None,
+    tail_node_quota: int = 0,
+    relevance_node_quota: int = 0,
+    preference_node_quota: int = 0,
+) -> str:
+    payload = (
+        "v2"
+        f"|max_nodes={max_nodes}|min_token_count={min_token_count}"
+        f"|tail_stats={tail_stats_fingerprint or 'legacy'}"
+        f"|tail_quota={tail_node_quota}"
+        f"|relevance_quota={relevance_node_quota}"
+        f"|preference_quota={preference_node_quota}"
+    )
     return hashlib.md5(payload.encode("utf-8")).hexdigest()[:12]
 
 
@@ -57,8 +74,20 @@ class GraphCacheManager:
         split_name: str,
         max_nodes: int,
         min_token_count: int,
+        *,
+        tail_stats_fingerprint: str | None = None,
+        tail_node_quota: int = 0,
+        relevance_node_quota: int = 0,
+        preference_node_quota: int = 0,
     ) -> Path:
-        version = _cache_version(max_nodes, min_token_count)
+        version = _cache_version(
+            max_nodes,
+            min_token_count,
+            tail_stats_fingerprint=tail_stats_fingerprint,
+            tail_node_quota=tail_node_quota,
+            relevance_node_quota=relevance_node_quota,
+            preference_node_quota=preference_node_quota,
+        )
         safe_name = dataset_name.replace("/", "__")
         return cache_root / safe_name / f"fold_{fold}" / split_name / f"graphs_{version}.pkl"
 
@@ -78,9 +107,24 @@ class GraphCacheManager:
         max_nodes: int = 512,
         min_token_count: int = 1,
         rebuild: bool = False,
+        tail_stats: TailTokenStats | None = None,
+        item_meta: dict | None = None,
+        tail_node_quota: int = 256,
+        relevance_node_quota: int = 128,
+        preference_node_quota: int = 128,
     ) -> GraphCacheManager:
+        tail_fingerprint = tail_stats.fingerprint if tail_stats is not None else None
         cache_path = cls.cache_path(
-            cache_root, dataset_name, fold, split_name, max_nodes, min_token_count,
+            cache_root,
+            dataset_name,
+            fold,
+            split_name,
+            max_nodes,
+            min_token_count,
+            tail_stats_fingerprint=tail_fingerprint,
+            tail_node_quota=tail_node_quota,
+            relevance_node_quota=relevance_node_quota,
+            preference_node_quota=preference_node_quota,
         )
         if cache_path.exists() and not rebuild:
             print(f"Loading graph cache: {cache_path}")
@@ -101,6 +145,7 @@ class GraphCacheManager:
             )
 
         attach_tokenizer_decode(tokenizer)
+        content_filter = lambda token_id: is_content_token(tokenizer, token_id, skip_token_ids)
 
         user_histories: dict[str, list[ReviewRecord]] = defaultdict(list)
         for row_key, row in history_dataset.iterrows():
@@ -129,6 +174,12 @@ class GraphCacheManager:
                 rec for rec in user_histories.get(raw_user, [])
                 if rec.row_key in allowed_history_keys[raw_user]
             ]
+            _title, _description, item_text = item_meta_from_row(raw_item, item_meta)
+            target_item_token_ids = {
+                int(token_id)
+                for token_id in tokenizer(item_text, add_special_tokens=False)["input_ids"]
+                if int(token_id) not in skip_token_ids
+            }
             graph = build_sample_token_graph(
                 history,
                 exclude_row_key=row_key,
@@ -136,6 +187,12 @@ class GraphCacheManager:
                 skip_token_ids=skip_token_ids,
                 max_nodes=max_nodes,
                 min_token_count=min_token_count,
+                tail_stats=tail_stats,
+                target_item_token_ids=target_item_token_ids,
+                content_token_filter=content_filter if tail_stats is not None else None,
+                tail_node_quota=tail_node_quota,
+                relevance_node_quota=relevance_node_quota,
+                preference_node_quota=preference_node_quota,
             )
             graphs[(split_name, local_idx)] = graph
 
@@ -145,8 +202,19 @@ class GraphCacheManager:
             "split_name": split_name,
             "max_nodes": max_nodes,
             "min_token_count": min_token_count,
+            "tail_stats_fingerprint": tail_fingerprint,
+            "tail_node_quota": tail_node_quota,
+            "relevance_node_quota": relevance_node_quota,
+            "preference_node_quota": preference_node_quota,
             "num_graphs": len(graphs),
-            "version": _cache_version(max_nodes, min_token_count),
+            "version": _cache_version(
+                max_nodes,
+                min_token_count,
+                tail_stats_fingerprint=tail_fingerprint,
+                tail_node_quota=tail_node_quota,
+                relevance_node_quota=relevance_node_quota,
+                preference_node_quota=preference_node_quota,
+            ),
         }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with cache_path.open("wb") as f:

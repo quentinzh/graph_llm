@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Callable, Iterable, TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from graph_llm.dataload.tail_stats import TailTokenStats
 
 
 @dataclass
@@ -82,6 +85,12 @@ def build_sample_token_graph(
     skip_token_ids: set[int],
     max_nodes: int = 512,
     min_token_count: int = 1,
+    tail_stats: TailTokenStats | None = None,
+    target_item_token_ids: set[int] | None = None,
+    content_token_filter: Callable[[int], bool] | None = None,
+    tail_node_quota: int = 256,
+    relevance_node_quota: int = 128,
+    preference_node_quota: int = 128,
 ) -> UserTokenGraph:
     """Build a directed token graph from leakage-safe user history.
 
@@ -107,10 +116,30 @@ def build_sample_token_graph(
         token_count.update(record.token_ids)
         token_doc_freq.update(seen)
 
-    ranked_tokens = [
-        tid for tid, _ in token_count.most_common(max_nodes)
-        if token_count[tid] >= min_token_count
+    eligible_token_ids = [
+        int(token_id)
+        for token_id in token_count
+        if token_count[token_id] >= min_token_count
+        and (content_token_filter is None or content_token_filter(int(token_id)))
     ]
+    if tail_stats is None:
+        # Keep the legacy order for callers that do not enable tail-aware caches.
+        ranked_tokens = sorted(
+            eligible_token_ids,
+            key=lambda token_id: (-token_count[token_id], token_id),
+        )[:max_nodes]
+    else:
+        ranked_tokens = _select_stratified_nodes(
+            eligible_token_ids,
+            token_count=token_count,
+            token_doc_freq=token_doc_freq,
+            tail_stats=tail_stats,
+            target_item_token_ids=target_item_token_ids or set(),
+            max_nodes=max_nodes,
+            tail_node_quota=tail_node_quota,
+            relevance_node_quota=relevance_node_quota,
+            preference_node_quota=preference_node_quota,
+        )
     if not ranked_tokens:
         return UserTokenGraph.empty()
 
@@ -168,6 +197,95 @@ def build_sample_token_graph(
     )
 
 
+def _select_stratified_nodes(
+    eligible_token_ids: list[int],
+    *,
+    token_count: Counter[int],
+    token_doc_freq: Counter[int],
+    tail_stats: TailTokenStats,
+    target_item_token_ids: set[int],
+    max_nodes: int,
+    tail_node_quota: int,
+    relevance_node_quota: int,
+    preference_node_quota: int,
+) -> list[int]:
+    """Retain tail, item-related, and stable-preference nodes under one budget."""
+    if max_nodes <= 0:
+        return []
+    if min(tail_node_quota, relevance_node_quota, preference_node_quota) < 0:
+        raise ValueError("node quotas must be non-negative")
+
+    budget = min(int(max_nodes), len(eligible_token_ids))
+    selected: list[int] = []
+    selected_set: set[int] = set()
+
+    def append_ranked(candidates: Iterable[int], quota: int, key) -> None:
+        if quota <= 0 or len(selected) >= budget:
+            return
+        limit = min(int(quota), budget - len(selected))
+        added = 0
+        ranked = sorted(candidates, key=key)
+        for token_id in ranked:
+            if token_id in selected_set:
+                continue
+            selected.append(int(token_id))
+            selected_set.add(int(token_id))
+            added += 1
+            if added >= limit or len(selected) >= budget:
+                break
+
+    # Lower global document frequency is preferred only inside the tail quota;
+    # lexical overlap with visible item metadata breaks ties without label leakage.
+    tail_candidates = [token_id for token_id in eligible_token_ids if tail_stats.is_tail(token_id)]
+    append_ranked(
+        tail_candidates,
+        tail_node_quota,
+        key=lambda token_id: (
+            -int(token_id in target_item_token_ids),
+            tail_stats.document_frequency(token_id),
+            -token_doc_freq[token_id],
+            -token_count[token_id],
+            token_id,
+        ),
+    )
+
+    # Retain nodes that share tokenizer ids with the target title/description.
+    append_ranked(
+        eligible_token_ids,
+        relevance_node_quota,
+        key=lambda token_id: (
+            -int(token_id in target_item_token_ids),
+            -token_doc_freq[token_id],
+            -token_count[token_id],
+            token_id,
+        ),
+    )
+
+    # Reserve capacity for stable personal preferences after tail/relevance nodes.
+    append_ranked(
+        eligible_token_ids,
+        preference_node_quota,
+        key=lambda token_id: (
+            -token_doc_freq[token_id],
+            -token_count[token_id],
+            token_id,
+        ),
+    )
+
+    # Deterministically backfill if a quota is undersubscribed or quotas total < budget.
+    append_ranked(
+        eligible_token_ids,
+        budget - len(selected),
+        key=lambda token_id: (
+            -int(token_id in target_item_token_ids),
+            -token_doc_freq[token_id],
+            -token_count[token_id],
+            token_id,
+        ),
+    )
+    return selected[:budget]
+
+
 def tokenizer_decode_stub(token_id: int) -> str:
     return f"<tok:{token_id}>"
 
@@ -179,52 +297,6 @@ def attach_tokenizer_decode(tokenizer) -> None:
         return tokenizer.decode([int(token_id)], skip_special_tokens=True)
 
     tokenizer_decode_stub = _decode
-
-
-def log_frequency_features(counts: np.ndarray, doc_freq: np.ndarray, num_reviews: int) -> np.ndarray:
-    """Return [N, 3] numeric features: log count, log doc freq, idf-like score."""
-    if counts.size == 0:
-        return np.empty((0, 3), dtype=np.float32)
-    log_count = np.log1p(counts)
-    log_df = np.log1p(doc_freq)
-    idf = np.log((max(num_reviews, 1) + 1.0) / (doc_freq + 1.0))
-    return np.stack([log_count, log_df, idf], axis=-1).astype(np.float32)
-
-
-def select_high_frequency_negatives(
-    graph: UserTokenGraph,
-    evidence_node_indices: np.ndarray,
-    *,
-    top_k: int,
-    protected_token_ids: set[int],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Pick unselected high-frequency nodes as UL negative candidates."""
-    if graph.num_nodes == 0 or top_k <= 0:
-        return np.empty((0,), dtype=np.int64), np.empty((0,), dtype=np.float32)
-
-    evidence_set = set(int(x) for x in evidence_node_indices.tolist())
-    ranked = np.argsort(-graph.node_counts)
-    neg_nodes: list[int] = []
-    neg_weights: list[float] = []
-    max_count = float(graph.node_counts.max()) if graph.node_counts.size else 1.0
-    for node_idx in ranked:
-        node_idx = int(node_idx)
-        if node_idx in evidence_set:
-            continue
-        token_id = int(graph.node_token_ids[node_idx])
-        if token_id in protected_token_ids:
-            continue
-        neg_nodes.append(node_idx)
-        neg_weights.append(float(graph.node_counts[node_idx]) / max(max_count, 1.0))
-        if len(neg_nodes) >= top_k:
-            break
-
-    if not neg_nodes:
-        return np.empty((0,), dtype=np.int64), np.empty((0,), dtype=np.float32)
-    return (
-        np.array(neg_nodes, dtype=np.int64),
-        np.array(neg_weights, dtype=np.float32),
-    )
 
 
 def batch_graphs(graphs: list[UserTokenGraph]) -> dict[str, np.ndarray | list[UserTokenGraph]]:

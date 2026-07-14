@@ -111,7 +111,7 @@ def print_experiment_summary(args, exp: dict[str, float | int | str]) -> None:
     print(f"lambda_feat: {args.lambda_feat}")
     print(f"evidence_bonus: {args.evidence_bonus}")
     print(f"top_m_evidence: {args.top_m_evidence}")
-    print(f"lambda_ul: {args.lambda_ul}")
+    print(f"lambda_selector: {args.lambda_selector}")
     print(f"devices: {args.devices}")
     print(f"ckpt_dir: {args.ckpt_dir}")
     print(f"log_dir: {args.log_dir}")
@@ -122,7 +122,7 @@ def print_experiment_summary(args, exp: dict[str, float | int | str]) -> None:
 def main() -> None:
     parser = build_arg_parser()
     parser.set_defaults(
-        lambda_ul=0.1,
+        lambda_selector=0.1,
         devices="1",
         model_path=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-4b"),
         embedding_model_path=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-embedding-0.6b"),

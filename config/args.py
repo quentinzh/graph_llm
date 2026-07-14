@@ -191,16 +191,22 @@ def build_arg_parser():
         help="How to include item description: keywords (default), full, or none.",
     )
     parser.add_argument("--lambda_feat", default=0.0001, type=float)
-    parser.add_argument("--lambda_ul", default=0.05, type=float)
+    parser.add_argument("--lambda_selector", default=0.1, type=float)
     parser.add_argument("--top_m_evidence", default=5, type=int)
-    parser.add_argument("--ul_candidate_k", default=20, type=int)
-    parser.add_argument("--ul_start_epoch", default=1, type=int)
     parser.add_argument("--evidence_bonus", default=0.1, type=float)
     parser.add_argument("--max_consecutive_token_repeat", default=3, type=int)
     parser.add_argument("--selector_hidden", default=256, type=int)
     parser.add_argument("--gnn_layers", default=2, type=int)
     parser.add_argument("--max_graph_nodes", default=512, type=int)
     parser.add_argument("--min_token_count", default=1, type=int)
+    parser.add_argument("--tail_alpha", default=0.5, type=float, choices=[0.5])
+    parser.add_argument("--tail_weight_min", default=0.5, type=float, choices=[0.5, 0.75])
+    parser.add_argument("--tail_weight_max", default=2.0, type=float, choices=[1.5, 2.0, 2.5])
+    parser.add_argument("--tail_df_fraction", default=0.001, type=float)
+    parser.add_argument("--tail_df_minimum", default=5, type=int)
+    parser.add_argument("--tail_node_quota", default=256, type=int)
+    parser.add_argument("--relevance_node_quota", default=128, type=int)
+    parser.add_argument("--preference_node_quota", default=128, type=int)
     parser.add_argument(
         "--graph_cache_dir",
         default=str(PACKAGE_ROOT / "data" / "graph_cache"),

@@ -22,11 +22,10 @@ from graph_llm.train import run
 
 if __name__ == "__main__":
     parser = build_arg_parser()
-    # 默认配置与 bonus_search.py 中 B1 完全对齐，可通过命令行参数覆盖（如 --devices 0）。
+    # 默认保留离散 top-M evidence bonus；不使用连续或 tail-scaled bonus。
     parser.set_defaults(
-        lambda_ul=0.1,
         lambda_feat=1e-2,
-        evidence_bonus=0.5,
+        evidence_bonus=0.1,
         top_m_evidence=5,
         devices="1",
         model_path=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-4b"),

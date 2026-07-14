@@ -54,6 +54,11 @@ from graph_llm.dataload.dataloader import (
 )
 from graph_llm.dataload.embeddings import QwenEmbeddingEncoder
 from graph_llm.dataload.sampler import LengthBucketSampler
+from graph_llm.dataload.tail_stats import (
+    TailTokenStats,
+    build_tail_token_stats,
+    is_content_token,
+)
 from graph_llm.metrics.metrics import (
     assign_tail_demand_groups,
     bleu_score,
@@ -668,18 +673,17 @@ def compute_batch_selector_tensors(
     tokenizer,
     args,
     device,
+    *,
+    input_ids=None,
+    tail_stats: TailTokenStats | None = None,
+    compute_selector_loss: bool = False,
 ):
-    protected = set(parse_special_token_ids(args.special_token_ids, tokenizer))
-    protected.add(tokenizer_pad_id(tokenizer))
-    protected.update(tokenizer_eos_ids(tokenizer))
-
     node_token_ids = graph_tensors["node_token_ids"]
     if node_token_ids.numel() == 0:
         batch_size = len(graphs)
         empty_long = torch.empty((batch_size, 0), dtype=torch.long, device=device)
         empty_mask = torch.empty((batch_size, 0), dtype=torch.bool, device=device)
-        empty_float = torch.empty((batch_size, 0), dtype=torch.float32, device=device)
-        return empty_long, empty_mask, empty_long, empty_mask, empty_float
+        return empty_long, empty_mask, torch.zeros((), dtype=torch.float32, device=device)
 
     unique_ids = sorted(set(node_token_ids.detach().cpu().tolist()))
     decode_fn = lambda tid: tokenizer.decode([int(tid)], skip_special_tokens=True)
@@ -697,23 +701,45 @@ def compute_batch_selector_tensors(
         dtype=torch.long,
     )
     node_token_emb = unique_emb[node_indices]
-    evidence_token_ids, evidence_token_mask, neg_token_ids, neg_token_mask, neg_weights = (
+    evidence_token_ids, evidence_token_mask, utility_scores = (
         build_selector_outputs(
             model.evidence_selector,
             graphs,
             node_token_emb,
             item_embs,
             top_m=args.top_m_evidence,
-            ul_candidate_k=args.ul_candidate_k,
-            protected_token_ids=protected,
         )
     )
+    selector_loss = torch.zeros((), dtype=torch.float32, device=device)
+    if compute_selector_loss:
+        if input_ids is None or tail_stats is None:
+            raise ValueError("selector supervision requires input_ids and tail_stats")
+        ignored = set(parse_special_token_ids(args.special_token_ids, tokenizer))
+        ignored.add(tokenizer_pad_id(tokenizer))
+        ignored.update(tokenizer_eos_ids(tokenizer))
+        losses = []
+        for batch_idx, graph in enumerate(graphs):
+            if graph.num_nodes == 0:
+                continue
+            target_ids = {
+                int(token_id)
+                for token_id in input_ids[batch_idx].detach().cpu().tolist()
+                if is_content_token(tokenizer, int(token_id), ignored)
+            }
+            loss = model.evidence_selector.sampled_bce_loss(
+                utility_scores[batch_idx],
+                graph,
+                target_ids,
+                tail_stats,
+            )
+            if loss.requires_grad or float(loss.detach().item()) != 0.0:
+                losses.append(loss)
+        if losses:
+            selector_loss = torch.stack(losses).mean()
     return (
         evidence_token_ids.to(device),
         evidence_token_mask.to(device),
-        neg_token_ids.to(device),
-        neg_token_mask.to(device),
-        neg_weights.to(device),
+        selector_loss,
     )
 
 
@@ -773,10 +799,11 @@ def train_epoch(
     scaler,
     log_name,
     tokenizer,
+    tail_stats,
+    tail_weight_table,
 ):
     model.train()
-    loss_log, nll_log, ul_log, feat_log = [], [], [], []
-    apply_ul = epoch >= args.ul_start_epoch
+    loss_log, nll_log, selector_log, feat_log = [], [], [], []
     last_batch_idx = -1
     for cuda_device in cuda_devices:
         if cuda_device.type == "cuda":
@@ -801,9 +828,19 @@ def train_epoch(
             feature_position_weights,
         ) = unpack_batch(batch, device)
 
-        evidence_token_ids, evidence_token_mask, neg_token_ids, neg_token_mask, neg_weights = (
+        evidence_token_ids, evidence_token_mask, selector_loss = (
             compute_batch_selector_tensors(
-                model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device,
+                model,
+                embedding_encoder,
+                graphs,
+                graph_tensors,
+                item_texts,
+                tokenizer,
+                args,
+                device,
+                input_ids=input_ids,
+                tail_stats=tail_stats,
+                compute_selector_loss=True,
             )
         )
         generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
@@ -816,7 +853,7 @@ def train_epoch(
 
         try:
             with autocast():
-                loss, nll_loss, ul_loss, feat_loss = model.train_step(
+                base_loss, nll_loss, feat_loss = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
@@ -824,18 +861,16 @@ def train_epoch(
                     target_item_mask=target_item_mask,
                     generation_prompt_ids=generation_prompt_ids,
                     generation_prompt_mask=generation_prompt_mask,
-                    neg_token_ids=neg_token_ids,
-                    neg_token_mask=neg_token_mask,
                     evidence_token_ids=evidence_token_ids,
                     evidence_token_mask=evidence_token_mask,
-                    neg_token_weights=neg_weights,
                     feature_position_mask=feature_position_mask,
                     feature_position_weights=feature_position_weights,
-                    apply_unlikelihood=apply_ul,
+                    tail_position_weights=tail_weight_table[input_ids],
                 )
+                loss = base_loss + float(args.lambda_selector) * selector_loss
             loss_log.append(loss.item())
             nll_log.append(nll_loss.item())
-            ul_log.append(ul_loss.item())
+            selector_log.append(selector_loss.detach().item())
             feat_log.append(feat_loss.item())
             scaler.scale(loss / args.accumulation_steps).backward()
         except torch.cuda.OutOfMemoryError:
@@ -858,14 +893,14 @@ def train_epoch(
         if (batch_idx + 1) % args.show_train_loss_steps == 0:
             msg = (
                 f"Train Epoch: {epoch} "
-                f"Loss: {np.mean(loss_log):.6f}\tNLL: {np.mean(nll_log):.6f}\t"
-                f"GraphUL: {np.mean(ul_log):.6f}\tFeat: {np.mean(feat_log):.6f}\t"
+                f"Loss: {np.mean(loss_log):.6f}\tTailSFT: {np.mean(nll_log):.6f}\t"
+                f"Selector: {np.mean(selector_log):.6f}\tFeat: {np.mean(feat_log):.6f}\t"
                 f"{cuda_memory_status(cuda_devices)}"
             )
             print(msg)
             write_log(log_name, msg)
             maybe_warn_cuda_memory(cuda_devices, args.memory_warn_gib)
-            loss_log, nll_log, ul_log, feat_log = [], [], [], []
+            loss_log, nll_log, selector_log, feat_log = [], [], [], []
 
         if args.max_train_batches and (batch_idx + 1) >= args.max_train_batches:
             print(f"Stopping train epoch early after {args.max_train_batches} batches (--max_train_batches).")
@@ -880,7 +915,18 @@ def train_epoch(
     maybe_warn_cuda_memory(cuda_devices, args.memory_warn_gib)
 
 
-def valid_step(model, embedding_encoder, dataloader, device, log_name, args, tokenizer, epoch=0):
+def valid_step(
+    model,
+    embedding_encoder,
+    dataloader,
+    device,
+    log_name,
+    args,
+    tokenizer,
+    tail_stats,
+    tail_weight_table,
+    epoch=0,
+):
     model.eval()
     loss_log = []
     with torch.no_grad():
@@ -900,9 +946,19 @@ def valid_step(model, embedding_encoder, dataloader, device, log_name, args, tok
                 feature_position_mask,
                 feature_position_weights,
             ) = unpack_batch(batch, device)
-            evidence_token_ids, evidence_token_mask, neg_token_ids, neg_token_mask, neg_weights = (
+            evidence_token_ids, evidence_token_mask, selector_loss = (
                 compute_batch_selector_tensors(
-                    model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device,
+                    model,
+                    embedding_encoder,
+                    graphs,
+                    graph_tensors,
+                    item_texts,
+                    tokenizer,
+                    args,
+                    device,
+                    input_ids=input_ids,
+                    tail_stats=tail_stats,
+                    compute_selector_loss=True,
                 )
             )
             generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
@@ -913,7 +969,7 @@ def valid_step(model, embedding_encoder, dataloader, device, log_name, args, tok
                 device,
             )
             with autocast():
-                loss, _nll, _ul, _feat = model.train_step(
+                base_loss, _nll, _feat = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
@@ -921,15 +977,13 @@ def valid_step(model, embedding_encoder, dataloader, device, log_name, args, tok
                     target_item_mask=target_item_mask,
                     generation_prompt_ids=generation_prompt_ids,
                     generation_prompt_mask=generation_prompt_mask,
-                    neg_token_ids=neg_token_ids,
-                    neg_token_mask=neg_token_mask,
                     evidence_token_ids=evidence_token_ids,
                     evidence_token_mask=evidence_token_mask,
-                    neg_token_weights=neg_weights,
                     feature_position_mask=feature_position_mask,
                     feature_position_weights=feature_position_weights,
-                    apply_unlikelihood=epoch >= args.ul_start_epoch,
+                    tail_position_weights=tail_weight_table[input_ids],
                 )
+                loss = base_loss + float(args.lambda_selector) * selector_loss
             loss_log.append(loss.item())
     avg_loss = float(np.mean(loss_log)) if loss_log else float("inf")
     print(f"valid Loss: {avg_loss}")
@@ -1107,8 +1161,15 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 _feature_position_mask,
                 _feature_position_weights,
             ) = unpack_batch(batch, device)
-            evidence_token_ids, evidence_token_mask, _, _, _ = compute_batch_selector_tensors(
-                model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device,
+            evidence_token_ids, evidence_token_mask, _ = compute_batch_selector_tensors(
+                model,
+                embedding_encoder,
+                graphs,
+                graph_tensors,
+                item_texts,
+                tokenizer,
+                args,
+                device,
             )
             generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
                 item_titles,
@@ -1208,6 +1269,21 @@ def _run_split(
     train_dataset, valid_dataset, test_dataset = dataset_split(dataset, split_index, args)
     train_history = train_dataset.copy()
     train_valid_history = pd.concat([train_dataset, valid_dataset], axis=0)
+    tail_stats = build_tail_token_stats(
+        train_dataset["text"].tolist(),
+        tokenizer=tokenizer,
+        ignored_token_ids=skip_token_ids,
+        alpha=args.tail_alpha,
+        weight_min=args.tail_weight_min,
+        weight_max=args.tail_weight_max,
+        tail_df_fraction=args.tail_df_fraction,
+        tail_df_minimum=args.tail_df_minimum,
+    )
+    print(
+        "Built train-only tail statistics: "
+        f"tokens={len(tail_stats.doc_freq)} reference_df={tail_stats.reference_df:.2f} "
+        f"tail_threshold={tail_stats.tail_threshold} fingerprint={tail_stats.fingerprint}"
+    )
 
     train_profiles = load_profile_cache(
         profile_cache_path(args, split_index, "train"),
@@ -1251,6 +1327,11 @@ def _run_split(
         max_nodes=args.max_graph_nodes,
         min_token_count=args.min_token_count,
         rebuild=args.rebuild_graph_cache,
+        tail_stats=tail_stats,
+        item_meta=item_meta,
+        tail_node_quota=args.tail_node_quota,
+        relevance_node_quota=args.relevance_node_quota,
+        preference_node_quota=args.preference_node_quota,
     )
     graph_valid = GraphCacheManager.build_or_load(
         full_dataset=dataset,
@@ -1265,6 +1346,11 @@ def _run_split(
         max_nodes=args.max_graph_nodes,
         min_token_count=args.min_token_count,
         rebuild=args.rebuild_graph_cache,
+        tail_stats=tail_stats,
+        item_meta=item_meta,
+        tail_node_quota=args.tail_node_quota,
+        relevance_node_quota=args.relevance_node_quota,
+        preference_node_quota=args.preference_node_quota,
     )
     graph_test = GraphCacheManager.build_or_load(
         full_dataset=dataset,
@@ -1279,6 +1365,11 @@ def _run_split(
         max_nodes=args.max_graph_nodes,
         min_token_count=args.min_token_count,
         rebuild=args.rebuild_graph_cache,
+        tail_stats=tail_stats,
+        item_meta=item_meta,
+        tail_node_quota=args.tail_node_quota,
+        relevance_node_quota=args.relevance_node_quota,
+        preference_node_quota=args.preference_node_quota,
     )
 
     train_set = GraphDataset(train_dataset, "train")
@@ -1436,7 +1527,6 @@ def _run_split(
         tokenizer=tokenizer,
         vocab_size=model_llm.config.vocab_size,
         evidence_selector=selector,
-        lambda_ul=args.lambda_ul,
         lambda_feat=args.lambda_feat,
         evidence_bonus=args.evidence_bonus,
         max_consecutive_token_repeat=args.max_consecutive_token_repeat,
@@ -1445,6 +1535,11 @@ def _run_split(
         special_token_ids=parse_special_token_ids(args.special_token_ids, tokenizer),
     ).to(device)
     model.model = model_llm
+    tail_weight_table = torch.tensor(
+        tail_stats.weight_table(model_llm.config.vocab_size),
+        dtype=torch.float32,
+        device=device,
+    )
 
     optimizer = AdamW([
         {
@@ -1488,17 +1583,21 @@ def _run_split(
             f"max_graph_nodes:{args.max_graph_nodes}\n"
         )
         f.write(
-            f"lambda_ul:{args.lambda_ul} lambda_feat:{args.lambda_feat} "
-            f"top_m_evidence:{args.top_m_evidence} "
-            f"ul_candidate_k:{args.ul_candidate_k}\n"
+            f"lambda_selector:{args.lambda_selector} lambda_feat:{args.lambda_feat} "
+            f"top_m_evidence:{args.top_m_evidence} evidence_bonus:{args.evidence_bonus}\n"
         )
         f.write(
-            f"ul_start_epoch:{args.ul_start_epoch} evidence_bonus:{args.evidence_bonus} "
-            f"max_consecutive_token_repeat:{args.max_consecutive_token_repeat}\n"
+            f"tail_alpha:{args.tail_alpha} tail_weight_min:{args.tail_weight_min} "
+            f"tail_weight_max:{args.tail_weight_max} tail_reference_df:{tail_stats.reference_df:.4f} "
+            f"tail_threshold:{tail_stats.tail_threshold}\n"
         )
         f.write(
-            "feature_loss: enabled via lambda_feat * feat on matched target positions, "
-            f"gated by ul_start_epoch={args.ul_start_epoch}\n"
+            "losses: tail-weighted SFT + lambda_selector * sampled selector BCE "
+            "+ lambda_feat * feature loss; graph UL disabled\n"
+        )
+        f.write(
+            f"node_quotas:tail={args.tail_node_quota} "
+            f"relevance={args.relevance_node_quota} preference={args.preference_node_quota}\n"
         )
         f.write(f"{device_layout}\n")
         f.write(f"embedding_backend:{embedding_encoder.backend}\n")
@@ -1524,10 +1623,20 @@ def _run_split(
             train_epoch(
                 model, embedding_encoder, train_loader, optimizer, device,
                 cuda_devices, epoch, args, scaler, log_name, tokenizer,
+                tail_stats, tail_weight_table,
             )
             collate_train.cur_step = len(train_loader) * (epoch + 1)
             valid_loss = valid_step(
-                model, embedding_encoder, valid_loader, device, log_name, args, tokenizer, epoch=epoch,
+                model,
+                embedding_encoder,
+                valid_loader,
+                device,
+                log_name,
+                args,
+                tokenizer,
+                tail_stats,
+                tail_weight_table,
+                epoch=epoch,
             )
             with open(log_name, "a+", encoding="utf-8") as f:
                 if best_loss < valid_loss:
@@ -1641,5 +1750,3 @@ def run(args):
                 f"All OOM fallback plans exhausted for fold {split_index}. "
                 f"Last error: {last_oom}"
             ) from last_oom
-
-
