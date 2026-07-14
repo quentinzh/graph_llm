@@ -1,4 +1,6 @@
---extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cu128
+# Linux CUDA 12.8 版 PyTorch。其专用的阿里云平铺 wheel 目录由
+# script/create_env.sh 的 GRAPH_PYTORCH_WHEEL_INDEX_URL 以 --find-links 注入，
+# 避免普通依赖在多个索引间重复解析；请优先通过 `bash script/create_env.sh` 安装。
 torch==2.7.1+cu128
 transformers==4.57.6
 peft==0.19.1

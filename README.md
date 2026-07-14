@@ -42,9 +42,22 @@ The explanation of <item title> for <user ID> is "
 ## Setup
 
 ```bash
+# AutoDL/Linux：默认使用阿里云 PyPI、阿里云 PyTorch CUDA wheel 与 HF 镜像。
+bash script/create_env.sh
+
+# 本地已有模型时可直接开始；否则单独通过 HF 镜像下载所需权重。
 bash aux/download_qwen3_4b.sh
 bash aux/download_qwen3_embedding_0.6b.sh
-# or: bash aux/setup_graph_env.sh
+```
+
+`requirements.txt` 中的 `torch==2.7.1+cu128` 需要 PyTorch 专用 wheel 目录。
+该目录由 `script/create_env.sh` 通过 `--find-links` 自动指定为阿里云镜像（不是
+`--extra-index-url` 包索引）。若 AutoDL 节点的网络更适合其他镜像，可临时覆盖：
+
+```bash
+GRAPH_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+GRAPH_PYTORCH_WHEEL_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cu128 \
+bash script/create_env.sh
 ```
 
 ## Derive profiles for small dataset

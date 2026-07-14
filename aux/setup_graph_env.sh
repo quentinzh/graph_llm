@@ -27,13 +27,11 @@ if ! command -v conda >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-  echo "Creating conda environment: $ENV_NAME"
-  conda create -y -n "$ENV_NAME" python=3.11
-fi
-
-echo "Installing Python dependencies into conda env: $ENV_NAME"
-conda run --no-capture-output -n "$ENV_NAME" python -m pip install -r "$GRAPH_ROOT/requirements.txt"
+# 复用统一入口，确保 CUDA PyTorch、普通 PyPI 与 Hugging Face 都使用同一套镜像配置。
+# 该脚本仅在基础环境完成后额外处理模型下载。
+echo "Installing Python dependencies via script/create_env.sh: $ENV_NAME"
+GRAPH_ENV_NAME="$ENV_NAME" GRAPH_HF_ENDPOINT="$HF_ENDPOINT_VALUE" \
+  bash "$GRAPH_ROOT/script/create_env.sh"
 
 if [[ "$SKIP_MODEL_DOWNLOAD" == "1" ]]; then
   echo "GRAPH_SKIP_MODEL_DOWNLOAD=1; skipping model downloads."

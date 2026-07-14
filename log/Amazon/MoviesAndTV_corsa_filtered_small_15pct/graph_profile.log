@@ -83,3 +83,101 @@ FMR  0.1048
 rouge_1 14.5876
 rouge_2  0.8944
 rouge_l  6.3204
+/root/autodl-tmp/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_ul:0.1 lambda_feat:0.01 top_m_evidence:5 ul_candidate_k:20
+ul_start_epoch:1 evidence_bonus:0.5 max_consecutive_token_repeat:3
+feature_loss: enabled via lambda_feat * feat on matched target positions, gated by ul_start_epoch=1
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:0:1
+/root/autodl-tmp/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_ul:0.1 lambda_feat:0.01 top_m_evidence:5 ul_candidate_k:20
+ul_start_epoch:1 evidence_bonus:0.5 max_consecutive_token_repeat:3
+feature_loss: enabled via lambda_feat * feat on matched target positions, gated by ul_start_epoch=1
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:0:1
+Train Epoch: 0 Loss: 3.874317	NLL: 3.874317	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.50, peak allocated/reserved=25.99/26.50
+Train Epoch: 0 Loss: 3.327704	NLL: 3.327704	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.50, peak allocated/reserved=25.99/26.50
+Train Epoch: 0 Loss: 3.271390	NLL: 3.271390	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.50, peak allocated/reserved=26.03/26.50
+Train Epoch: 0 Loss: 3.254010	NLL: 3.254010	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.82, peak allocated/reserved=26.26/26.82
+Train Epoch: 0 Loss: 3.238220	NLL: 3.238220	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.82, peak allocated/reserved=26.26/26.82
+Train Epoch: 0 Loss: 3.245764	NLL: 3.245764	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.82, peak allocated/reserved=26.35/26.82
+Train Epoch: 0 Loss: 3.215203	NLL: 3.215203	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.82, peak allocated/reserved=26.35/26.82
+Train Epoch: 0 Loss: 3.207255	NLL: 3.207255	GraphUL: 0.000000	Feat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.75/26.82, peak allocated/reserved=26.35/26.82
+valid Loss: 3.2020735434883147
+
+save model
+Train Epoch: 1 Loss: 3.151091	NLL: 3.122737	GraphUL: 0.004007	Feat: 2.795344	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.01, peak allocated/reserved=26.38/27.01
+Train Epoch: 1 Loss: 3.160312	NLL: 3.131658	GraphUL: 0.004022	Feat: 2.825209	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.01, peak allocated/reserved=26.52/27.01
+Train Epoch: 1 Loss: 3.170438	NLL: 3.142070	GraphUL: 0.003957	Feat: 2.797237	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.01, peak allocated/reserved=26.52/27.01
+Train Epoch: 1 Loss: 3.183485	NLL: 3.154200	GraphUL: 0.003922	Feat: 2.889314	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.61/27.21
+Train Epoch: 1 Loss: 3.174672	NLL: 3.146598	GraphUL: 0.003906	Feat: 2.768318	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.61/27.21
+Train Epoch: 1 Loss: 3.146788	NLL: 3.118073	GraphUL: 0.003956	Feat: 2.831884	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.61/27.21
+Train Epoch: 1 Loss: 3.179038	NLL: 3.150077	GraphUL: 0.004059	Feat: 2.855462	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.61/27.21
+Train Epoch: 1 Loss: 3.148160	NLL: 3.120097	GraphUL: 0.003969	Feat: 2.766591	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.65/27.21
+valid Loss: 3.2062323496687366
+
+Train Epoch: 2 Loss: 3.047227	NLL: 3.020266	GraphUL: 0.003901	Feat: 2.657039	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.34/27.21
+Train Epoch: 2 Loss: 3.052993	NLL: 3.026514	GraphUL: 0.003933	Feat: 2.608594	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.52/27.21
+Train Epoch: 2 Loss: 3.039804	NLL: 3.012855	GraphUL: 0.003915	Feat: 2.655695	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.56/27.21
+Train Epoch: 2 Loss: 3.049971	NLL: 3.022973	GraphUL: 0.003944	Feat: 2.660445	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.56/27.21
+Train Epoch: 2 Loss: 3.052187	NLL: 3.024883	GraphUL: 0.003867	Feat: 2.691692	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.56/27.21
+Train Epoch: 2 Loss: 3.038940	NLL: 3.012247	GraphUL: 0.004032	Feat: 2.628959	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.56/27.21
+Train Epoch: 2 Loss: 3.055178	NLL: 3.028340	GraphUL: 0.003983	Feat: 2.643983	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.56/27.21
+Train Epoch: 2 Loss: 3.025552	NLL: 2.999252	GraphUL: 0.003943	Feat: 2.590559	CUDA memory cuda:0 GiB current allocated/reserved=8.75/27.21, peak allocated/reserved=26.56/27.21
+valid Loss: 3.212385772329281
+
+eval_group: all | samples: 4299 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1 12.4433
+BLEU-4  0.7316
+USR  0.4257 | USN    1830
+Distinct-1  0.9262
+Distinct-2  0.8592
+ENTR  7.8638
+DIV  0.3562
+FCR  0.3172
+FMR  0.1621
+rouge_1 14.9007
+rouge_2  1.9061
+rouge_l 11.4196
+eval_group: low | samples: 859 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1 15.4993
+BLEU-4  0.8337
+USR  0.5600 | USN     481
+Distinct-1  0.9394
+Distinct-2  0.8499
+ENTR  7.5516
+DIV  0.3776
+FCR  0.4672
+FMR  0.2177
+rouge_1 18.5834
+rouge_2  2.7182
+rouge_l 13.0400
+eval_group: high | samples: 859 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1 10.8946
+BLEU-4  0.5057
+USR  0.6205 | USN     533
+Distinct-1  0.9175
+Distinct-2  0.8669
+ENTR  7.6051
+DIV  0.3290
+FCR  0.2448
+FMR  0.0978
+rouge_1 12.3155
+rouge_2  1.0132
+rouge_l  9.9802

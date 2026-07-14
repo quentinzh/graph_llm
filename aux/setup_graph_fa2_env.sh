@@ -8,6 +8,10 @@ ENV_NAME="${GRAPH_FA2_ENV_NAME:-graph_llm_fa2}"
 HF_ENDPOINT_VALUE="${GRAPH_HF_ENDPOINT:-${HF_ENDPOINT:-https://hf-mirror.com}}"
 SKIP_MODEL_DOWNLOAD="${GRAPH_SKIP_MODEL_DOWNLOAD:-1}"
 MAX_JOBS="${GRAPH_FA2_MAX_JOBS:-8}"
+# flash-attn 安装同样使用 AutoDL 镜像与持久 pip 缓存；需要备用源时可显式覆盖。
+PIP_INDEX_URL="${GRAPH_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}"
+PIP_EXTRA_INDEX_URL="${GRAPH_PIP_EXTRA_INDEX_URL:-}"
+PIP_CACHE_DIR="${GRAPH_PIP_CACHE_DIR:-$HOME/.cache/pip}"
 
 export HF_ENDPOINT="$HF_ENDPOINT_VALUE"
 
@@ -30,19 +34,20 @@ if ! command -v conda >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-  echo "Creating conda environment: $ENV_NAME (python=3.11 for flash-attn wheels)"
-  conda create -y -n "$ENV_NAME" python=3.11
+# 基础依赖交给统一入口，保证 CUDA PyTorch wheel 一定从配置的镜像索引安装。
+echo "Installing graph_llm dependencies via script/create_env.sh: $ENV_NAME"
+GRAPH_ENV_NAME="$ENV_NAME" GRAPH_HF_ENDPOINT="$HF_ENDPOINT_VALUE" \
+  bash "$GRAPH_ROOT/script/create_env.sh"
+
+PIP_MIRROR_ARGS=(--index-url "$PIP_INDEX_URL" --prefer-binary --no-input --disable-pip-version-check)
+if [[ -n "$PIP_EXTRA_INDEX_URL" ]]; then
+  PIP_MIRROR_ARGS+=(--extra-index-url "$PIP_EXTRA_INDEX_URL")
 fi
 
-echo "Installing graph_llm dependencies into conda env: $ENV_NAME"
-conda run --no-capture-output -n "$ENV_NAME" env PIP_USER=0 PYTHONNOUSERSITE=1 python -m pip install -U pip
-conda run --no-capture-output -n "$ENV_NAME" env PIP_USER=0 PYTHONNOUSERSITE=1 \
-  python -m pip install -r "$GRAPH_ROOT/requirements.txt"
-
 echo "Installing flash-attn (MAX_JOBS=$MAX_JOBS; may take several minutes)..."
-conda run --no-capture-output -n "$ENV_NAME" env PIP_USER=0 PYTHONNOUSERSITE=1 MAX_JOBS="$MAX_JOBS" \
-  python -m pip install flash-attn --no-build-isolation
+mkdir -p "$PIP_CACHE_DIR"
+conda run --no-capture-output -n "$ENV_NAME" env PIP_USER=0 PYTHONNOUSERSITE=1 PIP_CACHE_DIR="$PIP_CACHE_DIR" MAX_JOBS="$MAX_JOBS" \
+  python -m pip install "${PIP_MIRROR_ARGS[@]}" flash-attn --no-build-isolation
 
 echo "Verifying flash_attn import..."
 conda run --no-capture-output -n "$ENV_NAME" env PYTHONNOUSERSITE=1 python -c "import flash_attn; print('flash_attn', flash_attn.__version__)"
