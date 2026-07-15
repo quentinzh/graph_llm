@@ -53,6 +53,10 @@ from graph_llm.dataload.dataloader import (
     tokenizer_special_ids,
 )
 from graph_llm.dataload.embeddings import QwenEmbeddingEncoder
+from graph_llm.dataload.prototypes import (
+    TrainingOnlyPrototypeRetriever,
+    select_reranked_candidate,
+)
 from graph_llm.dataload.sampler import LengthBucketSampler
 from graph_llm.dataload.tail_stats import (
     TailTokenStats,
@@ -649,14 +653,29 @@ def build_batch_prompt_tensors(
     tokenizer,
     args,
     device,
+    *,
+    item_prototypes=None,
+    user_prototypes=None,
 ):
     pad_id = tokenizer_pad_id(tokenizer)
+    prompt_budget = int(args.max_generation_prompt_tokens)
+    if item_prototypes is not None or user_prototypes is not None:
+        # 两条 prototype 各限长 32 token，额外预留段落标签，避免被旧的 20-token
+        # generation prompt 上限意外截断。
+        prompt_budget += 2 * (int(args.prototype_max_tokens) + 8)
     generation_prompt_ids, generation_prompt_mask = build_generation_prompt_batch(
         item_titles,
         raw_users,
         tokenizer,
         pad_id,
-        max_tokens=args.max_generation_prompt_tokens,
+        max_tokens=prompt_budget,
+        item_prototypes=item_prototypes,
+        user_prototypes=user_prototypes,
+        prototype_max_tokens=(
+            int(args.prototype_max_tokens)
+            if item_prototypes is not None or user_prototypes is not None
+            else 0
+        ),
     )
     return (
         generation_prompt_ids.to(device),
@@ -1140,10 +1159,52 @@ def append_eval_metrics(
             f.write("{} {:7.4f}\n".format(key, value))
 
 
-def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, output_dir, word, tokenizer, args):
+def _token_words(ids, tokenizer):
+    """将一条生成 token 序列转换为与评价指标一致的词序列。"""
+    return ids2words(
+        ids_clear(
+            ids,
+            pad_token_id=tokenizer_pad_id(tokenizer),
+            eos_token_ids=tokenizer_eos_ids(tokenizer),
+            skip_token_ids=tokenizer_skip_ids(tokenizer),
+        ),
+        tokenizer,
+    )
+
+
+def _prototype_words(text, tokenizer):
+    if not text:
+        return []
+    ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+    return ids2words(ids, tokenizer)
+
+
+def _batch_evidence_words(evidence_token_ids, evidence_token_mask, tokenizer, batch_idx):
+    if evidence_token_ids is None or evidence_token_mask is None:
+        return []
+    ids = evidence_token_ids[batch_idx][evidence_token_mask[batch_idx]].detach().cpu().tolist()
+    return ids2words(ids, tokenizer)
+
+
+def test_step(
+    model,
+    embedding_encoder,
+    dataloader,
+    device,
+    log_name,
+    dataset,
+    output_dir,
+    word,
+    tokenizer,
+    args,
+    *,
+    prototype_retriever=None,
+):
     model.eval()
     predict, label = [], []
     max_batches = int(getattr(args, "max_eval_batches", 0) or 0)
+    raw_items_in_order = [str(item) for item in dataset.df["raw_item"].tolist()]
+    item_prototype_available = user_prototype_available = evaluated_samples = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Test generate")):
             (
@@ -1171,30 +1232,96 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 args,
                 device,
             )
+            current_batch_size = len(raw_users)
+            start = evaluated_samples
+            end = start + current_batch_size
+            raw_items = raw_items_in_order[start:end]
+            if len(raw_items) != current_batch_size:
+                raise RuntimeError("Test dataloader order does not align with the evaluation dataset")
+
+            item_prototypes = user_prototypes = None
+            if prototype_retriever is not None:
+                prototype_batch = prototype_retriever.retrieve_batch(
+                    raw_users,
+                    raw_items,
+                    item_texts,
+                )
+                item_prototypes = prototype_batch.item_prototypes
+                user_prototypes = prototype_batch.user_prototypes
+                item_prototype_available += prototype_batch.item_available
+                user_prototype_available += prototype_batch.user_available
             generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
                 item_titles,
                 raw_users,
                 tokenizer,
                 args,
                 device,
+                item_prototypes=item_prototypes,
+                user_prototypes=user_prototypes,
             )
-            generated = model.greedy_generate(
-                profile_ids,
-                profile_mask,
-                target_item_ids,
-                target_item_mask,
-                generation_prompt_ids,
-                generation_prompt_mask,
-                word,
-                device,
-                evidence_token_ids=evidence_token_ids,
-                evidence_token_mask=evidence_token_mask,
-            )
+            if prototype_retriever is None:
+                generated = model.greedy_generate(
+                    profile_ids,
+                    profile_mask,
+                    target_item_ids,
+                    target_item_mask,
+                    generation_prompt_ids,
+                    generation_prompt_mask,
+                    word,
+                    device,
+                    evidence_token_ids=evidence_token_ids,
+                    evidence_token_mask=evidence_token_mask,
+                )
+            else:
+                all_candidates, all_logprobs = model.sample_generate_candidates(
+                    profile_ids,
+                    profile_mask,
+                    target_item_ids,
+                    target_item_mask,
+                    generation_prompt_ids,
+                    generation_prompt_mask,
+                    word,
+                    device,
+                    num_candidates=args.prototype_num_candidates,
+                    temperature=args.prototype_temperature,
+                    top_p=args.prototype_top_p,
+                    evidence_token_ids=evidence_token_ids,
+                    evidence_token_mask=evidence_token_mask,
+                )
+                generated = []
+                for local_idx in range(current_batch_size):
+                    candidates = [candidate[local_idx] for candidate in all_candidates]
+                    candidate_words = [_token_words(candidate, tokenizer) for candidate in candidates]
+                    selected_idx = select_reranked_candidate(
+                        candidate_words,
+                        [logprobs[local_idx] for logprobs in all_logprobs],
+                        _prototype_words(item_prototypes[local_idx], tokenizer),
+                        _prototype_words(user_prototypes[local_idx], tokenizer),
+                        _batch_evidence_words(
+                            evidence_token_ids,
+                            evidence_token_mask,
+                            tokenizer,
+                            local_idx,
+                        ),
+                    )
+                    generated.append(candidates[selected_idx])
             predict.extend(generated)
             label.extend(input_ids.tolist())
+            evaluated_samples += current_batch_size
             if max_batches and (batch_idx + 1) >= max_batches:
                 print(f"Stopping test early after {max_batches} batches (--max_eval_batches).")
                 break
+
+    if prototype_retriever is not None:
+        summary = (
+            "prototype_retrieval: candidates=train_only "
+            f"samples={evaluated_samples} item_available={item_prototype_available} "
+            f"user_available={user_prototype_available} "
+            f"num_candidates={args.prototype_num_candidates} "
+            f"prototype_max_tokens={args.prototype_max_tokens}\n"
+        )
+        print(summary.strip())
+        write_log(log_name, summary.strip())
 
     def _subset_group_indices(group_indices):
         n = len(predict)
@@ -1523,6 +1650,22 @@ def _run_split(
         gnn_layers=args.gnn_layers,
     ).to(device)
 
+    prototype_retriever = None
+    if args.use_prototype_retrieval:
+        # 只将 train_dataset 传给 retriever；validation/test 评论从未进入候选索引。
+        prototype_retriever = TrainingOnlyPrototypeRetriever(
+            train_dataset,
+            train_valid_profiles,
+            embedding_encoder,
+            embedding_batch_size=args.prototype_embedding_batch_size,
+        )
+        print(
+            "Enabled train-only prototype retrieval: "
+            f"candidates={len(prototype_retriever)} "
+            f"max_tokens={args.prototype_max_tokens} "
+            f"num_candidates={args.prototype_num_candidates}"
+        )
+
     model = GraphEvidenceCIER(
         tokenizer=tokenizer,
         vocab_size=model_llm.config.vocab_size,
@@ -1581,6 +1724,13 @@ def _run_split(
             f"max_target_item_tokens:{args.max_target_item_tokens} "
             f"max_generation_prompt_tokens:{args.max_generation_prompt_tokens} "
             f"max_graph_nodes:{args.max_graph_nodes}\n"
+        )
+        f.write(
+            "prototype_retrieval: "
+            f"enabled={args.use_prototype_retrieval} candidates=train_only "
+            f"prototype_max_tokens={args.prototype_max_tokens} "
+            f"num_candidates={args.prototype_num_candidates} "
+            f"temperature={args.prototype_temperature} top_p={args.prototype_top_p}\n"
         )
         f.write(
             f"lambda_selector:{args.lambda_selector} lambda_feat:{args.lambda_feat} "
@@ -1658,6 +1808,7 @@ def _run_split(
     test_step(
         model, embedding_encoder, test_loader, device, log_name,
         test_set, generation_path, args.word, tokenizer, args,
+        prototype_retriever=prototype_retriever,
     )
     torch.cuda.empty_cache()
 
@@ -1669,6 +1820,8 @@ def run(args):
         + args.max_target_item_tokens
         + args.max_generation_prompt_tokens
     )
+    if args.use_prototype_retrieval:
+        _prompt_budget += 2 * (args.prototype_max_tokens + 8)
     if _prompt_budget > 512:
         print(
             f"WARNING: prompt token budget ({_prompt_budget}) > 512. "

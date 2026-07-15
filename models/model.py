@@ -415,10 +415,63 @@ class GraphEvidenceCIER(nn.Module):
         evidence_token_ids=None,
         evidence_token_mask=None,
     ):
-        text = torch.tensor([[]], dtype=torch.long, device=device)
-        last_words = torch.tensor([[]], dtype=torch.long, device=device)
+        text, _average_logprobs = self._generate_once(
+            profile_ids,
+            profile_mask,
+            target_item_ids,
+            target_item_mask,
+            generation_prompt_ids,
+            generation_prompt_mask,
+            word,
+            device,
+            evidence_token_ids=evidence_token_ids,
+            evidence_token_mask=evidence_token_mask,
+            do_sample=False,
+        )
+        return text
+
+    def _sample_top_p(self, logits, temperature: float, top_p: float):
+        """从 nucleus 分布采样下一个 token，同时保留受控 logits 的置信度。"""
+        temperature = max(float(temperature), 1e-5)
+        top_p = min(max(float(top_p), 1e-5), 1.0)
+        sampling_logits = logits / temperature
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(sampling_logits, descending=True, dim=-1)
+            sorted_probs = torch.softmax(sorted_logits, dim=-1)
+            remove = torch.cumsum(sorted_probs, dim=-1) - sorted_probs > top_p
+            # 每行至少保留最可能 token，避免极端 top-p 产生空分布。
+            remove[:, 0] = False
+            filtered_logits = torch.full_like(sampling_logits, float("-inf"))
+            filtered_logits.scatter_(1, sorted_indices, sorted_logits.masked_fill(remove, float("-inf")))
+            sampling_logits = filtered_logits
+        probabilities = torch.softmax(sampling_logits, dim=-1)
+        return torch.multinomial(probabilities, num_samples=1)
+
+    @torch.no_grad()
+    def _generate_once(
+        self,
+        profile_ids,
+        profile_mask,
+        target_item_ids,
+        target_item_mask,
+        generation_prompt_ids,
+        generation_prompt_mask,
+        word,
+        device,
+        *,
+        evidence_token_ids=None,
+        evidence_token_mask=None,
+        do_sample: bool,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+    ):
+        """执行一次自回归生成，并返回每条样本的平均 token 对数概率。"""
+        batch_size = profile_ids.shape[0]
+        text = torch.empty((batch_size, 0), dtype=torch.long, device=device)
+        last_words = torch.empty((batch_size, 0), dtype=torch.long, device=device)
         kv_cache = None
         attention_mask = None
+        logprob_sums = torch.zeros(batch_size, dtype=torch.float32, device=device)
         for _ in range(word):
             logits, kv_cache, attention_mask = self.forward(
                 input_ids=last_words,
@@ -437,9 +490,56 @@ class GraphEvidenceCIER(nn.Module):
                 evidence_token_mask=evidence_token_mask,
                 generated_ids=text if text.shape[1] > 0 else None,
             )
-            last_words = torch.argmax(logits, dim=1).unsqueeze(1)
+            token_logprobs = torch.log_softmax(logits.float(), dim=-1)
+            if do_sample:
+                last_words = self._sample_top_p(logits, temperature, top_p)
+            else:
+                last_words = torch.argmax(logits, dim=1, keepdim=True)
+            logprob_sums += token_logprobs.gather(1, last_words).squeeze(1)
             text = last_words if text.shape[1] == 0 else torch.cat([text, last_words], 1)
-        return text.cpu().tolist()
+        average_logprobs = logprob_sums / max(int(word), 1)
+        return text.cpu().tolist(), average_logprobs.cpu().tolist()
+
+    @torch.no_grad()
+    def sample_generate_candidates(
+        self,
+        profile_ids,
+        profile_mask,
+        target_item_ids,
+        target_item_mask,
+        generation_prompt_ids,
+        generation_prompt_mask,
+        word,
+        device,
+        *,
+        num_candidates: int,
+        temperature: float,
+        top_p: float,
+        evidence_token_ids=None,
+        evidence_token_mask=None,
+    ):
+        """顺序采样多个候选，避免将候选数直接乘进 GPU batch 占用。"""
+        num_candidates = max(int(num_candidates), 1)
+        all_candidates, all_logprobs = [], []
+        for _ in range(num_candidates):
+            candidates, average_logprobs = self._generate_once(
+                profile_ids,
+                profile_mask,
+                target_item_ids,
+                target_item_mask,
+                generation_prompt_ids,
+                generation_prompt_mask,
+                word,
+                device,
+                evidence_token_ids=evidence_token_ids,
+                evidence_token_mask=evidence_token_mask,
+                do_sample=True,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            all_candidates.append(candidates)
+            all_logprobs.append(average_logprobs)
+        return all_candidates, all_logprobs
 
 
 def build_selector_outputs(

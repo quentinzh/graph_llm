@@ -185,6 +185,41 @@ def build_arg_parser():
     parser.add_argument("--max_target_item_tokens", default=64, type=int)
     parser.add_argument("--max_generation_prompt_tokens", default=20, type=int)
     parser.add_argument(
+        "--use_prototype_retrieval",
+        action="store_true",
+        help="Use train-only item/user review prototypes during evaluation generation.",
+    )
+    parser.add_argument(
+        "--prototype_max_tokens",
+        default=32,
+        type=int,
+        help="Maximum tokens retained for each retrieved prototype.",
+    )
+    parser.add_argument(
+        "--prototype_num_candidates",
+        default=4,
+        type=int,
+        help="Number of sampled explanations to generate before prototype-aware reranking.",
+    )
+    parser.add_argument(
+        "--prototype_temperature",
+        default=0.8,
+        type=float,
+        help="Sampling temperature for prototype retrieval generation.",
+    )
+    parser.add_argument(
+        "--prototype_top_p",
+        default=0.9,
+        type=float,
+        help="Nucleus threshold for prototype retrieval generation.",
+    )
+    parser.add_argument(
+        "--prototype_embedding_batch_size",
+        default=16,
+        type=int,
+        help="Frozen Qwen embedding batch size used to retrieve train-only prototypes.",
+    )
+    parser.add_argument(
         "--item_description_mode",
         default="keywords",
         choices=["keywords", "full", "none"],

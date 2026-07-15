@@ -32,6 +32,10 @@ from graph_llm.aux.prompt_utils import (
     tokenize_text_list,
 )
 from graph_llm.dataload.dataloader import GraphCollater
+from graph_llm.dataload.prototypes import (
+    TrainingOnlyPrototypeRetriever,
+    select_reranked_candidate,
+)
 from graph_llm.dataload.tail_stats import TailTokenStats, build_tail_token_stats
 from graph_llm.metrics.metrics import bleu_score, rouge_score
 from graph_llm.models.selector import EvidenceSelector, pad_token_matrix
@@ -897,6 +901,65 @@ class _StubEmbeddingEncoder:
         return torch.randn(len(texts), 4, device=self.embed_device)
 
 
+class _PrototypeEmbeddingEncoder:
+    """为训练集专属 prototype 测试提供可解释的确定性向量。"""
+
+    def __init__(self):
+        self.mapping = {
+            "profile likes intense films": [1.0, 0.0],
+            "Title: Target\nDescription: dramatic scenes": [0.0, 1.0],
+            "item profile match": [1.0, 0.0],
+            "item profile mismatch": [0.0, 1.0],
+            "user item match": [0.0, 1.0],
+            "same item must be excluded": [1.0, 1.0],
+        }
+
+    def encode_texts(self, texts, batch_size=16):
+        del batch_size
+        return torch.tensor(
+            [self.mapping.get(text, [0.0, 0.0]) for text in texts],
+            dtype=torch.float32,
+        )
+
+
+def test_train_only_prototype_retrieval_and_rerank():
+    """双 prototype 只从传入训练集选择，且两条余弦规则互不混合。"""
+    train = pd.DataFrame(
+        [
+            {"raw_user": "u0", "raw_item": "item_x", "review_text": "same item must be excluded"},
+            {"raw_user": "u1", "raw_item": "item_x", "review_text": "item profile match"},
+            {"raw_user": "u2", "raw_item": "item_x", "review_text": "item profile mismatch"},
+            {"raw_user": "u0", "raw_item": "item_y", "review_text": "user item match"},
+        ]
+    )
+    retriever = TrainingOnlyPrototypeRetriever(
+        train,
+        {"u0": {"profile_text": "profile likes intense films"}},
+        _PrototypeEmbeddingEncoder(),
+    )
+    prototypes = retriever.retrieve_batch(
+        ["u0"],
+        ["item_x"],
+        ["Title: Target\nDescription: dramatic scenes"],
+    )
+    assert prototypes.item_prototypes == ["item profile match"]
+    assert prototypes.user_prototypes == ["user item match"]
+    assert prototypes.item_available == 1
+    assert prototypes.user_available == 1
+    # 第二个候选比模板句的 prototype 短语重合更高，应被无标签重排选中。
+    selected = select_reranked_candidate(
+        [
+            ["the", "movie", "is", "very", "good"],
+            ["powerful", "scenes", "leave", "a", "lasting", "impression"],
+        ],
+        [-0.05, -0.10],
+        ["powerful", "scenes", "lasting", "impression"],
+        ["leave", "a", "lasting", "impression"],
+        ["scenes"],
+    )
+    assert selected == 1
+
+
 def test_compute_batch_selector_tensors_moves_embeddings_to_primary():
     if torch.cuda.is_available() and torch.cuda.device_count() >= 2:
         embed_device = torch.device("cuda:1")
@@ -992,6 +1055,7 @@ if __name__ == "__main__":
     test_resolve_llm_device_map_mode_auto()
     test_build_llm_max_memory_reserves_embedding_space()
     test_compute_batch_selector_tensors_moves_embeddings_to_primary()
+    test_train_only_prototype_retrieval_and_rerank()
     test_resolve_local_model_path_prefers_graph_copy()
     test_embedding_cache_corruption_recovery()
     print("graph smoke tests passed")
