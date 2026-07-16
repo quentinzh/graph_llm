@@ -246,8 +246,17 @@ def test_tail_stats_and_selector_bce():
     selector = EvidenceSelector(embed_dim=4, hidden_dim=8, gnn_layers=1)
     scores = selector.forward_single(graph, torch.randn(3, 4), torch.randn(4))
     loss = selector.sampled_bce_loss(scores, graph, {13}, stats)
+    feature_weighted_loss = selector.sampled_bce_loss(
+        scores,
+        graph,
+        {13},
+        stats,
+        feature_token_ids={13},
+        feature_positive_weight=3.0,
+    )
     loss.backward()
     assert loss.item() > 0.0
+    assert not torch.isclose(loss, feature_weighted_loss)
     assert any(param.grad is not None for param in selector.parameters())
 
 

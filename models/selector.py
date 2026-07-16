@@ -116,6 +116,8 @@ class EvidenceSelector(nn.Module):
         graph: UserTokenGraph,
         positive_token_ids: set[int],
         tail_stats: TailTokenStats,
+        feature_token_ids: set[int] | None = None,
+        feature_positive_weight: float = 1.0,
     ) -> torch.Tensor:
         """Supervise graph evidence with one positive set and sampled negatives.
 
@@ -199,8 +201,19 @@ class EvidenceSelector(nn.Module):
             negative_indices, device=utility_scores.device, dtype=torch.long,
         )
         balance = float(len(negative_indices)) / float(len(positive_indices))
+        feature_token_ids = feature_token_ids or set()
         positive_weights = torch.tensor(
-            [balance * tail_stats.tail_weight(node_ids[index]) for index in positive_indices],
+            [
+                # 仅对目标解释中的核心 feature 加权，避免把邻近词误当作 feature。
+                balance
+                * tail_stats.tail_weight(node_ids[index])
+                * (
+                    feature_positive_weight
+                    if node_ids[index] in feature_token_ids
+                    else 1.0
+                )
+                for index in positive_indices
+            ],
             device=utility_scores.device,
             dtype=utility_scores.dtype,
         )

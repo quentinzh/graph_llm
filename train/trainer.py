@@ -41,6 +41,7 @@ from graph_llm.config import (
 )
 from graph_llm.dataload.cache import GraphCacheManager
 from graph_llm.dataload.dataloader import (
+    FEATURE_CORE_WEIGHT,
     GraphCollater,
     GraphDataset,
     assert_profile_coverage,
@@ -675,6 +676,7 @@ def compute_batch_selector_tensors(
     device,
     *,
     input_ids=None,
+    feature_position_weights=None,
     tail_stats: TailTokenStats | None = None,
     compute_selector_loss: bool = False,
 ):
@@ -726,11 +728,27 @@ def compute_batch_selector_tensors(
                 for token_id in input_ids[batch_idx].detach().cpu().tolist()
                 if is_content_token(tokenizer, int(token_id), ignored)
             }
+            core_feature_ids = set()
+            if feature_position_weights is not None:
+                # 仅权重为 2.0 的位置是核心 feature；0.2/0.1 的邻近词不参与此加权。
+                core_feature_ids = {
+                    int(token_id)
+                    for token_id, position_weight in zip(
+                        input_ids[batch_idx].detach().cpu().tolist(),
+                        feature_position_weights[batch_idx].detach().cpu().tolist(),
+                    )
+                    if float(position_weight) >= FEATURE_CORE_WEIGHT
+                    and is_content_token(tokenizer, int(token_id), ignored)
+                }
             loss = model.evidence_selector.sampled_bce_loss(
                 utility_scores[batch_idx],
                 graph,
                 target_ids,
                 tail_stats,
+                feature_token_ids=core_feature_ids,
+                feature_positive_weight=getattr(
+                    args, "selector_feature_positive_weight", 3.0
+                ),
             )
             if loss.requires_grad or float(loss.detach().item()) != 0.0:
                 losses.append(loss)
@@ -839,6 +857,7 @@ def train_epoch(
                 args,
                 device,
                 input_ids=input_ids,
+                feature_position_weights=feature_position_weights,
                 tail_stats=tail_stats,
                 compute_selector_loss=True,
             )
@@ -957,6 +976,7 @@ def valid_step(
                     args,
                     device,
                     input_ids=input_ids,
+                    feature_position_weights=feature_position_weights,
                     tail_stats=tail_stats,
                     compute_selector_loss=True,
                 )
@@ -1600,6 +1620,7 @@ def _run_split(
         )
         f.write(
             f"lambda_selector:{args.lambda_selector} lambda_feat:{args.lambda_feat} "
+            f"selector_feature_positive_weight:{args.selector_feature_positive_weight} "
             f"top_m_evidence:{args.top_m_evidence} evidence_bonus:{args.evidence_bonus}\n"
         )
         f.write(

@@ -192,6 +192,12 @@ def build_arg_parser():
     )
     parser.add_argument("--lambda_feat", default=0.0001, type=float)
     parser.add_argument("--lambda_selector", default=0.1, type=float)
+    parser.add_argument(
+        "--selector_feature_positive_weight",
+        default=3.0,
+        type=float,
+        help="selector BCE 中核心 feature 正样本的额外权重",
+    )
     parser.add_argument("--top_m_evidence", default=5, type=int)
     parser.add_argument("--evidence_bonus", default=0.1, type=float)
     parser.add_argument("--max_consecutive_token_repeat", default=3, type=int)
