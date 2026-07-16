@@ -1091,7 +1091,7 @@ def append_eval_metrics(
             f.write("eval_group: {} | samples: {}{}\n".format(group_name, len(indices), info))
         if len(indices) == 0:
             f.write("no samples\n")
-            return
+            return {}
 
         group_predict = [predict[i] for i in indices]
         group_label = [label[i] for i in indices]
@@ -1119,8 +1119,10 @@ def append_eval_metrics(
             )
             for ids in group_predict
         ]
-        f.write("BLEU-1 {:7.4f}\n".format(bleu_score(tokens_test, tokens_predict, n_gram=1)))
-        f.write("BLEU-4 {:7.4f}\n".format(bleu_score(tokens_test, tokens_predict, n_gram=4)))
+        bleu_1 = bleu_score(tokens_test, tokens_predict, n_gram=1)
+        bleu_4 = bleu_score(tokens_test, tokens_predict, n_gram=4)
+        f.write("BLEU-1 {:7.4f}\n".format(bleu_1))
+        f.write("BLEU-4 {:7.4f}\n".format(bleu_4))
         usr, usn = unique_sentence_percent(tokens_predict)
         f.write("USR {:7.4f} | USN {:7}\n".format(usr, usn))
         d1, d2, entr = corpus_diversity(tokens_predict)
@@ -1133,11 +1135,24 @@ def append_eval_metrics(
         f.write("DIV {:7.4f}\n".format(div))
         fcr = feature_coverage_ratio(feature_batch, feature_set) if len(feature_set) > 0 else 0.0
         f.write("FCR {:7.4f}\n".format(fcr))
-        f.write("FMR {:7.4f}\n".format(feature_matching_ratio(feature_batch, group_features)))
+        fmr = feature_matching_ratio(feature_batch, group_features)
+        f.write("FMR {:7.4f}\n".format(fmr))
         text_test = [" ".join(tokens) for tokens in tokens_test]
         text_predict = [" ".join(tokens) for tokens in tokens_predict]
-        for key, value in rouge_score(text_test, text_predict).items():
+        rouge_metrics = rouge_score(text_test, text_predict)
+        for key, value in rouge_metrics.items():
             f.write("{} {:7.4f}\n".format(key, value))
+    return {
+        "BLEU-1": bleu_1,
+        "BLEU-4": bleu_4,
+        "Distinct-1": d1,
+        "Distinct-2": d2,
+        "ENTR": entr,
+        "DIV": div,
+        "FCR": fcr,
+        "FMR": fmr,
+        **rouge_metrics,
+    }
 
 
 def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, output_dir, word, tokenizer, args):
@@ -1209,7 +1224,7 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 f"max_eval_batches: {max_batches} | evaluated_samples: {len(predict)} | "
                 + (group_info or "")
             )
-        append_eval_metrics(
+        all_metrics = append_eval_metrics(
             log_name,
             dataset,
             tokenizer,
@@ -1233,8 +1248,9 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 group_name=group_name,
                 group_info=group_info,
             )
+        return all_metrics
     else:
-        append_eval_metrics(log_name, dataset, tokenizer, predict, label, output_dir)
+        return append_eval_metrics(log_name, dataset, tokenizer, predict, label, output_dir)
 
 
 def load_best_checkpoint(model, ckpt_prefix, device):
@@ -1614,7 +1630,8 @@ def _run_split(
         if hasattr(model_llm, "hf_device_map") and model_llm.hf_device_map:
             f.write(f"llm_layer_placement:{describe_module_device_map(model_llm)}\n")
 
-    best_loss = float("inf")
+    # 最优 checkpoint 仅由验证集生成 FMR 决定，不再由 teacher-forcing loss 决定。
+    best_fmr = float("-inf")
     early_stop = args.early_stop_patience
     if not args.only_eval:
         for epoch in range(args.epochs):
@@ -1638,13 +1655,30 @@ def _run_split(
                 tail_weight_table,
                 epoch=epoch,
             )
+            validation_generation_path = str(
+                output_dir / f"{split_index}valid_epoch{epoch}.dataset"
+            )
+            valid_metrics = test_step(
+                model,
+                embedding_encoder,
+                valid_loader,
+                device,
+                log_name,
+                valid_set,
+                validation_generation_path,
+                args.word,
+                tokenizer,
+                args,
+            )
+            valid_fmr = float(valid_metrics.get("FMR", 0.0))
             with open(log_name, "a+", encoding="utf-8") as f:
-                if best_loss < valid_loss:
+                f.write(f"valid FMR: {valid_fmr:.6f}\n")
+                if valid_fmr <= best_fmr:
                     early_stop -= 1
                 else:
-                    print("save model")
-                    f.write("save model\n")
-                    best_loss = valid_loss
+                    print(f"save model (best valid FMR: {valid_fmr:.6f})")
+                    f.write(f"save model (best valid FMR: {valid_fmr:.6f})\n")
+                    best_fmr = valid_fmr
                     model.model.save_pretrained(ckpt_prefix + "model")
                     torch.save(model.evidence_selector.state_dict(), ckpt_prefix + "selector.bin")
                     with open(ckpt_prefix + "graph_config.json", "w", encoding="utf-8") as cf:

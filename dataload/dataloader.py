@@ -35,6 +35,13 @@ FEATURE_STOPWORDS = {
     "description", "explanation", "useful", "token", "evidence", "none",
 }
 
+# 保持 feature 为辅助损失的主要监督信号，同时为其附近的内容词提供少量短语上下文。
+FEATURE_CORE_WEIGHT = 2.0
+FEATURE_NEIGHBOR_WEIGHTS = {
+    1: 0.2,
+    2: 0.1,
+}
+
 
 class GraphDataset(Dataset):
     """Dataset wrapper with split metadata."""
@@ -147,7 +154,13 @@ class GraphCollater:
         return variants
 
     def _feature_position_weights(self, ids, keyword):
+        """构造 feature 及其局部上下文的位置权重。
+
+        feature 本身使用较大权重以优先保障 FMR；仅对相邻的有效内容词
+        赋予较小权重，帮助模型学习 feature 所在的短语表达。
+        """
         weights = [0.0] * len(ids)
+        feature_positions = set()
         for variant in self._keyword_token_variants(keyword):
             width = len(variant)
             if width == 0 or width > len(ids):
@@ -157,7 +170,23 @@ class GraphCollater:
                     continue
                 for offset, token_id in enumerate(variant):
                     if self._keep_feature_token(token_id):
-                        weights[start + offset] = 1.0
+                        feature_positions.add(start + offset)
+
+        for position in feature_positions:
+            weights[position] = FEATURE_CORE_WEIGHT
+
+        # 多 token feature 的内部位置保持 core 权重；只扩展到 feature span 外的内容词。
+        for position in feature_positions:
+            for distance, neighbor_weight in FEATURE_NEIGHBOR_WEIGHTS.items():
+                for neighbor in (position - distance, position + distance):
+                    if (
+                        neighbor < 0
+                        or neighbor >= len(ids)
+                        or neighbor in feature_positions
+                        or not self._keep_feature_token(ids[neighbor])
+                    ):
+                        continue
+                    weights[neighbor] = max(weights[neighbor], neighbor_weight)
         return weights
 
     def __call__(self, data):

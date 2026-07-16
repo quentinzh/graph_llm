@@ -600,7 +600,7 @@ def test_graph_collater_feature_mask_matches_spaced_keyword_variant():
         }
     ])
     assert batch[11].tolist() == [[False, True, False]]
-    assert batch[12].tolist() == [[0.0, 1.0, 0.0]]
+    assert batch[12].tolist() == [[0.0, 2.0, 0.0]]
 
 
 def test_graph_collater_feature_mask_filters_short_bpe_pieces():
@@ -628,7 +628,38 @@ def test_graph_collater_feature_mask_filters_short_bpe_pieces():
         }
     ])
     assert batch[11].tolist() == [[False, True]]
-    assert batch[12].tolist() == [[0.0, 1.0]]
+    assert batch[12].tolist() == [[0.0, 2.0]]
+
+
+def test_graph_collater_feature_weights_include_local_content_context():
+    tokenizer = DummyTokenizer()
+    collater = GraphCollater(
+        max_step=1000,
+        word=20,
+        tokenizer=tokenizer,
+        profile_records={},
+        item_meta={},
+        graph_manager=None,
+    )
+    batch = collater([
+        {
+            "text": [10, 11, 13],
+            "keyword": [10],
+            "keyword_words": "great",
+            "user": 0,
+            "item": 1,
+            "raw_user": "user_a",
+            "raw_item": "item_a",
+            "rating": 4,
+            "local_idx": 0,
+            "split_name": "test",
+        }
+    ])
+    assert batch[11].tolist() == [[True, True, True]]
+    torch.testing.assert_close(
+        batch[12],
+        torch.tensor([[2.0, 0.2, 0.1]], dtype=torch.float32),
+    )
 
 
 def test_lora_defaults_target_qkvo_r16():
