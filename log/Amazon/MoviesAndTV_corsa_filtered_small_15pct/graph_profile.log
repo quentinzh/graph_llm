@@ -487,3 +487,224 @@ FMR  0.0873
 rouge_1 13.0161
 rouge_2  1.2546
 rouge_l 10.8923
+/root/autodl-tmp/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_selector:0.1 lambda_feat:0.01 selector_feature_positive_weight:3.0 top_m_evidence:5 evidence_bonus:0.1
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:2.0 tail_reference_df:572.0000 tail_threshold:35
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:0:1
+/root/autodl-tmp/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_selector:0.1 lambda_feat:0.01 selector_feature_positive_weight:3.0 top_m_evidence:5 evidence_bonus:0.1
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:2.0 tail_reference_df:572.0000 tail_threshold:35
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:0:1
+Train Epoch: 0 Loss: 4.364122	TailSFT: 4.239029	Selector: 0.884035	Feat: 3.668961	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.70, peak allocated/reserved=28.27/28.70
+Train Epoch: 0 Loss: 3.800027	TailSFT: 3.702326	Selector: 0.655974	Feat: 3.210318	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.70, peak allocated/reserved=28.27/28.70
+Train Epoch: 0 Loss: 3.780628	TailSFT: 3.681921	Selector: 0.667327	Feat: 3.197489	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.70, peak allocated/reserved=28.27/28.70
+Train Epoch: 0 Loss: 3.751087	TailSFT: 3.652438	Selector: 0.668911	Feat: 3.175789	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 0 Loss: 3.723751	TailSFT: 3.626017	Selector: 0.666540	Feat: 3.108055	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 0 Loss: 3.699059	TailSFT: 3.600511	Selector: 0.673713	Feat: 3.117649	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 0 Loss: 3.746989	TailSFT: 3.649618	Selector: 0.665895	Feat: 3.078145	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 0 Loss: 3.722031	TailSFT: 3.624982	Selector: 0.663386	Feat: 3.071051	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+valid Loss: 3.7357327619006644
+
+eval_group: all | samples: 4300 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 10.9815
+BLEU-4  0.6101
+USR  0.5640 | USN    2425
+Distinct-1  0.9051
+Distinct-2  0.8399
+ENTR  8.6634
+DIV  0.1773
+FCR  0.4406
+FMR  0.1170
+rouge_1 13.2444
+rouge_2  1.4038
+rouge_l 10.7490
+eval_group: low | samples: 860 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 13.3254
+BLEU-4  0.6266
+USR  0.7174 | USN     617
+Distinct-1  0.9104
+Distinct-2  0.8369
+ENTR  8.1678
+DIV  0.1880
+FCR  0.6400
+FMR  0.1419
+rouge_1 15.1998
+rouge_2  1.6933
+rouge_l 11.0856
+eval_group: high | samples: 860 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1  9.8980
+BLEU-4  0.4906
+USR  0.6767 | USN     582
+Distinct-1  0.9018
+Distinct-2  0.8401
+ENTR  8.0920
+DIV  0.1732
+FCR  0.3107
+FMR  0.0826
+rouge_1 11.9061
+rouge_2  1.0347
+rouge_l 10.1708
+valid FMR: 0.116977
+save model (best valid FMR: 0.116977)
+Train Epoch: 1 Loss: 3.598461	TailSFT: 3.503559	Selector: 0.649973	Feat: 2.990536	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 1 Loss: 3.618845	TailSFT: 3.525410	Selector: 0.639287	Feat: 2.950628	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 1 Loss: 3.596351	TailSFT: 3.501104	Selector: 0.658768	Feat: 2.936939	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 1 Loss: 3.626083	TailSFT: 3.530051	Selector: 0.659961	Feat: 3.003645	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 1 Loss: 3.583540	TailSFT: 3.488729	Selector: 0.657173	Feat: 2.909355	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 1 Loss: 3.593596	TailSFT: 3.498703	Selector: 0.656624	Feat: 2.923049	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 1 Loss: 3.576911	TailSFT: 3.481831	Selector: 0.654963	Feat: 2.958359	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+Train Epoch: 1 Loss: 3.600625	TailSFT: 3.506182	Selector: 0.654031	Feat: 2.903989	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.28/28.72
+valid Loss: 3.704006432600624
+
+eval_group: all | samples: 4300 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 12.4604
+BLEU-4  0.6731
+USR  0.6695 | USN    2879
+Distinct-1  0.8911
+Distinct-2  0.8742
+ENTR  9.5969
+DIV  0.1217
+FCR  0.4802
+FMR  0.1114
+rouge_1 13.8529
+rouge_2  1.5491
+rouge_l 10.6916
+eval_group: low | samples: 860 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 12.0567
+BLEU-4  0.4946
+USR  0.8047 | USN     692
+Distinct-1  0.8954
+Distinct-2  0.8752
+ENTR  9.0991
+DIV  0.1285
+FCR  0.7000
+FMR  0.1360
+rouge_1 16.1512
+rouge_2  1.9054
+rouge_l 10.5618
+eval_group: high | samples: 860 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 11.3836
+BLEU-4  0.3800
+USR  0.8163 | USN     702
+Distinct-1  0.8887
+Distinct-2  0.8728
+ENTR  9.0797
+DIV  0.1201
+FCR  0.3580
+FMR  0.0814
+rouge_1 12.2925
+rouge_2  1.0003
+rouge_l 10.2042
+valid FMR: 0.111395
+Train Epoch: 2 Loss: 3.489682	TailSFT: 3.397758	Selector: 0.635872	Feat: 2.833666	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.27/28.72
+Train Epoch: 2 Loss: 3.457653	TailSFT: 3.365840	Selector: 0.638585	Feat: 2.795471	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.27/28.72
+Train Epoch: 2 Loss: 3.456382	TailSFT: 3.364065	Selector: 0.642635	Feat: 2.805352	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 2 Loss: 3.448675	TailSFT: 3.357400	Selector: 0.632668	Feat: 2.800813	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 2 Loss: 3.428144	TailSFT: 3.337238	Selector: 0.636475	Feat: 2.725893	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 2 Loss: 3.445470	TailSFT: 3.353380	Selector: 0.639480	Feat: 2.814206	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 2 Loss: 3.421685	TailSFT: 3.331066	Selector: 0.630892	Feat: 2.752997	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+Train Epoch: 2 Loss: 3.445485	TailSFT: 3.354243	Selector: 0.638017	Feat: 2.743982	CUDA memory cuda:0 GiB current allocated/reserved=8.76/28.72, peak allocated/reserved=28.29/28.72
+valid Loss: 3.721200257872117
+
+eval_group: all | samples: 4300 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 12.3194
+BLEU-4  0.6655
+USR  0.6809 | USN    2928
+Distinct-1  0.9249
+Distinct-2  0.8668
+ENTR  9.4374
+DIV  0.2495
+FCR  0.5000
+FMR  0.1398
+rouge_1 14.3995
+rouge_2  1.7654
+rouge_l 11.1229
+eval_group: low | samples: 860 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 13.3577
+BLEU-4  0.7658
+USR  0.7965 | USN     685
+Distinct-1  0.9340
+Distinct-2  0.8615
+ENTR  8.8509
+DIV  0.2884
+FCR  0.6600
+FMR  0.1884
+rouge_1 16.9912
+rouge_2  2.2031
+rouge_l 11.5026
+eval_group: high | samples: 860 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2580 | low_tail_demand: n=860 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=860 | mean=0.499207 | min=0.363636 | max=1.000000
+BLEU-1 10.9840
+BLEU-4  0.3549
+USR  0.8221 | USN     707
+Distinct-1  0.9199
+Distinct-2  0.8705
+ENTR  8.9558
+DIV  0.2212
+FCR  0.3491
+FMR  0.0814
+rouge_1 12.2633
+rouge_2  1.0703
+rouge_l 10.0590
+valid FMR: 0.139767
+save model (best valid FMR: 0.139767)
+eval_group: all | samples: 4299 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1 12.4278
+BLEU-4  0.7362
+USR  0.6781 | USN    2915
+Distinct-1  0.9203
+Distinct-2  0.8698
+ENTR  9.3944
+DIV  0.2682
+FCR  0.4946
+FMR  0.1307
+rouge_1 14.3121
+rouge_2  1.7157
+rouge_l 11.0354
+eval_group: low | samples: 859 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1 13.7269
+BLEU-4  0.6983
+USR  0.8114 | USN     697
+Distinct-1  0.9242
+Distinct-2  0.8663
+ENTR  8.8684
+DIV  0.2718
+FCR  0.7705
+FMR  0.1851
+rouge_1 17.8020
+rouge_2  2.2030
+rouge_l 11.8429
+eval_group: high | samples: 859 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 2581 | low_tail_demand: n=859 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=859 | mean=0.492742 | min=0.375000 | max=1.000000
+BLEU-1 11.2264
+BLEU-4  0.5297
+USR  0.8102 | USN     696
+Distinct-1  0.9118
+Distinct-2  0.8737
+ENTR  9.0071
+DIV  0.2215
+FCR  0.3761
+FMR  0.0733
+rouge_1 12.5016
+rouge_2  1.1951
+rouge_l 10.0495
