@@ -821,7 +821,7 @@ def train_epoch(
     tail_weight_table,
 ):
     model.train()
-    loss_log, nll_log, selector_log, feat_log = [], [], [], []
+    loss_log, nll_log, selector_log, feat_log, future_log = [], [], [], [], []
     last_batch_idx = -1
     for cuda_device in cuda_devices:
         if cuda_device.type == "cuda":
@@ -872,7 +872,7 @@ def train_epoch(
 
         try:
             with autocast():
-                base_loss, nll_loss, feat_loss = model.train_step(
+                base_loss, nll_loss, feat_loss, future_loss = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
@@ -891,6 +891,7 @@ def train_epoch(
             nll_log.append(nll_loss.item())
             selector_log.append(selector_loss.detach().item())
             feat_log.append(feat_loss.item())
+            future_log.append(future_loss.item())
             scaler.scale(loss / args.accumulation_steps).backward()
         except torch.cuda.OutOfMemoryError:
             msg = (
@@ -914,12 +915,13 @@ def train_epoch(
                 f"Train Epoch: {epoch} "
                 f"Loss: {np.mean(loss_log):.6f}\tTailSFT: {np.mean(nll_log):.6f}\t"
                 f"Selector: {np.mean(selector_log):.6f}\tFeat: {np.mean(feat_log):.6f}\t"
+                f"Future: {np.mean(future_log):.6f}\t"
                 f"{cuda_memory_status(cuda_devices)}"
             )
             print(msg)
             write_log(log_name, msg)
             maybe_warn_cuda_memory(cuda_devices, args.memory_warn_gib)
-            loss_log, nll_log, selector_log, feat_log = [], [], [], []
+            loss_log, nll_log, selector_log, feat_log, future_log = [], [], [], [], []
 
         if args.max_train_batches and (batch_idx + 1) >= args.max_train_batches:
             print(f"Stopping train epoch early after {args.max_train_batches} batches (--max_train_batches).")
@@ -989,7 +991,7 @@ def valid_step(
                 device,
             )
             with autocast():
-                base_loss, _nll, _feat = model.train_step(
+                base_loss, _nll, _feat, _future = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
@@ -1558,6 +1560,12 @@ def _run_split(
         hidden_dim=args.selector_hidden,
         gnn_layers=args.gnn_layers,
     ).to(device)
+    future_tail_token_ids = sorted(
+        int(token_id)
+        for token_id in tail_stats.doc_freq
+        if 0 <= int(token_id) < model_llm.config.vocab_size
+        and tail_stats.is_tail(int(token_id))
+    )
 
     model = GraphEvidenceCIER(
         tokenizer=tokenizer,
@@ -1565,6 +1573,17 @@ def _run_split(
         evidence_selector=selector,
         lambda_feat=args.lambda_feat,
         evidence_bonus=args.evidence_bonus,
+        hidden_size=model_llm.config.hidden_size,
+        future_steps=args.future_steps,
+        lambda_future=args.lambda_future,
+        future_decay=args.future_decay,
+        future_head_rank=args.future_head_rank,
+        future_num_candidates=args.future_num_candidates,
+        future_random_negatives=args.future_random_negatives,
+        future_tail_negatives=args.future_tail_negatives,
+        future_graph_candidates=args.future_graph_candidates,
+        future_temperature=args.future_temperature,
+        future_tail_token_ids=future_tail_token_ids,
         max_consecutive_token_repeat=args.max_consecutive_token_repeat,
         pad_token_id=tokenizer_pad_id(tokenizer),
         eos_token_ids=tokenizer_eos_ids(tokenizer),
@@ -1577,7 +1596,7 @@ def _run_split(
         device=device,
     )
 
-    optimizer = AdamW([
+    optimizer_groups = [
         {
             "params": [p for p in model.evidence_selector.parameters() if p.requires_grad],
             "lr": args.learning_rate,
@@ -1586,7 +1605,17 @@ def _run_split(
             "params": [p for p in model.model.parameters() if p.requires_grad],
             "lr": args.learning_rate / 10,
         },
-    ])
+    ]
+    future_parameters = [
+        p for p in model.future_adapters.parameters() if p.requires_grad
+    ]
+    if future_parameters:
+        # 未来预测头从头训练，使用与 selector 相同的学习率。
+        optimizer_groups.insert(1, {
+            "params": future_parameters,
+            "lr": args.learning_rate,
+        })
+    optimizer = AdamW(optimizer_groups)
     scaler = GradScaler()
 
     ckpt_dir = Path(args.ckpt_dir) / args.dataset_name
@@ -1624,13 +1653,23 @@ def _run_split(
             f"top_m_evidence:{args.top_m_evidence} evidence_bonus:{args.evidence_bonus}\n"
         )
         f.write(
+            f"future_steps:{args.future_steps} lambda_future:{args.lambda_future} "
+            f"future_decay:{args.future_decay} future_head_rank:{args.future_head_rank} "
+            f"future_num_candidates:{args.future_num_candidates} "
+            f"future_random_negatives:{args.future_random_negatives} "
+            f"future_tail_negatives:{args.future_tail_negatives} "
+            f"future_graph_candidates:{args.future_graph_candidates} "
+            f"future_temperature:{args.future_temperature}\n"
+        )
+        f.write(
             f"tail_alpha:{args.tail_alpha} tail_weight_min:{args.tail_weight_min} "
             f"tail_weight_max:{args.tail_weight_max} tail_reference_df:{tail_stats.reference_df:.4f} "
             f"tail_threshold:{tail_stats.tail_threshold}\n"
         )
         f.write(
             "losses: tail-weighted SFT + lambda_selector * sampled selector BCE "
-            "+ lambda_feat * feature loss; graph UL disabled\n"
+            "+ lambda_feat * feature loss + lambda_future * sampled MTP; "
+            "graph UL disabled\n"
         )
         f.write(
             f"node_quotas:tail={args.tail_node_quota} "

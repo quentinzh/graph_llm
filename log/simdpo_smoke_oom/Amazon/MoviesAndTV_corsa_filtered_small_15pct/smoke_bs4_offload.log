@@ -1,0 +1,17 @@
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_selector:0.1 lambda_feat:0.01 selector_feature_positive_weight:3.0 top_m_evidence:5 evidence_bonus:0.1
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:2.0 tail_reference_df:572.0000 tail_threshold:35
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss; graph UL disabled
+simdpo: enabled after SFT | one epoch | train-only preference groups | simdpo_batch_size=4 | simdpo_precompute_batch_size=16 | selector_graph=frozen | four negatives averaged per source sample | cache_reuse=default (pass --rebuild_simdpo_cache to force rebuild)
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:0:1
+OOM on plan manual: CUDA out of memory. Tried to allocate 16.00 MiB. GPU 0 has a total capacity of 44.39 GiB of which 13.31 MiB is free. Process 3362154 has 3.18 GiB memory in use. Including non-PyTorch memory, this process has 41.12 GiB memory in use. Of the allocated memory 40.26 GiB is allocated by PyTorch, and 518.76 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

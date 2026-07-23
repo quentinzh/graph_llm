@@ -27,6 +27,12 @@ if __name__ == "__main__":
         lambda_feat=1e-2,
         evidence_bonus=0.1,
         top_m_evidence=5,
+        # 训练期 sampled MTP：主 head 预测 t+1，两个轻量 head 预测 t+2/t+3。
+        future_steps=3,
+        lambda_future=0.1,
+        future_decay=0.5,
+        future_head_rank=64,
+        future_num_candidates=1024,
         devices="1",
         model_path=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-4b"),
         embedding_model_path=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-embedding-0.6b"),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import platform
 import sys
 import tempfile
 from importlib.util import find_spec
@@ -167,11 +169,25 @@ class TrainableTinyLM(torch.nn.Module):
     def get_input_embeddings(self):
         return self.embedding
 
-    def forward(self, inputs_embeds=None, attention_mask=None, use_cache=False, logits_to_keep=None, **_kwargs):
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def forward(
+        self,
+        inputs_embeds=None,
+        attention_mask=None,
+        use_cache=False,
+        logits_to_keep=None,
+        output_hidden_states=False,
+        **_kwargs,
+    ):
         # 补一个末位置，使 GraphEvidenceCIER 能对每个 target token 计算 NLL。
         last_state = inputs_embeds[:, -1:, :]
         hidden = torch.cat([inputs_embeds, last_state], dim=1)
-        return {"logits": self.lm_head(hidden)}
+        output = {"logits": self.lm_head(hidden)}
+        if output_hidden_states:
+            output["hidden_states"] = (hidden,)
+        return output
 
 
 def test_directed_edges_and_leakage():
@@ -327,7 +343,7 @@ def test_train_step_uses_adjusted_logits_nll():
 
     input_ids = torch.tensor([[10, 11]])
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10]], pad_value=-1)
-    loss, nll, feat = model.train_step(
+    loss, nll, feat, future = model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
@@ -338,6 +354,7 @@ def test_train_step_uses_adjusted_logits_nll():
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(loss, manual_nll)
     assert feat.item() == 0.0
+    assert future.item() == 0.0
 
 
 def test_train_step_uses_tail_weighted_sft():
@@ -350,7 +367,10 @@ def test_train_step_uses_tail_weighted_sft():
 
     input_ids = torch.tensor([[10, 11]])
     tail_weights = torch.tensor([[2.0, 0.5]])
-    loss, nll, feat = model.train_step(input_ids, tail_position_weights=tail_weights)
+    loss, nll, feat, future = model.train_step(
+        input_ids,
+        tail_position_weights=tail_weights,
+    )
 
     log_probs = torch.log_softmax(fixed_logits[:2], dim=-1)
     token_nll = torch.stack([-log_probs[0, 10], -log_probs[1, 11]])
@@ -358,6 +378,7 @@ def test_train_step_uses_tail_weighted_sft():
     assert torch.allclose(nll, expected)
     assert torch.allclose(loss, expected)
     assert feat.item() == 0.0
+    assert future.item() == 0.0
 
 
 def test_two_batch_tail_sft_training_smoke():
@@ -372,13 +393,120 @@ def test_two_batch_tail_sft_training_smoke():
     ]
     for input_ids, tail_weights in batches:
         optimizer.zero_grad()
-        loss, _nll, _feat = model.train_step(
+        loss, _nll, _feat, _future = model.train_step(
             input_ids,
             tail_position_weights=tail_weights,
         )
         assert torch.isfinite(loss)
         loss.backward()
         optimizer.step()
+
+
+def resolve_mtp_smoke_device(requested="auto"):
+    """为两批 MTP smoke test 选择设备，并保留显式 CPU/GPU 接口。"""
+    requested = str(requested).strip().lower()
+    if requested != "auto":
+        device = torch.device(requested)
+        if device.type == "cuda":
+            if not torch.cuda.is_available() or device.index >= torch.cuda.device_count():
+                raise RuntimeError(f"Requested smoke device is unavailable: {device}")
+        return device
+    # MacBook 默认 CPU；服务器优先 cuda:1，同时保留 cuda:0 回退。
+    if platform.system() == "Darwin":
+        return torch.device("cpu")
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        return torch.device("cuda:1")
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    return torch.device("cpu")
+
+
+def test_future_candidate_set_contains_all_shifted_targets():
+    tokenizer = DummyTokenizer()
+    model = _make_model(
+        tokenizer,
+        hidden_size=8,
+        future_steps=3,
+        lambda_future=0.1,
+        future_head_rank=4,
+        future_num_candidates=16,
+        future_random_negatives=4,
+        future_tail_negatives=2,
+        future_graph_candidates=2,
+        future_tail_token_ids=(13, 14),
+    )
+    input_ids = torch.tensor([
+        [10, 11, 13, 2],
+        [10, 14, 2, 0],
+    ])
+    evidence_ids, evidence_mask = pad_token_matrix([[18, 19], [18]], pad_value=-1)
+    candidate_ids, candidate_log_q = model._build_future_candidates(
+        input_ids,
+        evidence_token_ids=evidence_ids,
+        evidence_token_mask=evidence_mask,
+    )
+
+    # t+2/t+3 的全部非 PAD 目标，以及 graph 困难候选都必须出现。
+    expected = {2, 11, 13, 14, 18, 19}
+    assert expected.issubset(set(candidate_ids.tolist()))
+    assert candidate_ids.numel() <= model.future_num_candidates
+    assert candidate_ids.numel() == candidate_log_q.numel()
+    assert torch.isfinite(candidate_log_q).all()
+
+
+def run_two_batch_sampled_mtp_training_smoke(device="auto"):
+    """恰好运行两个 batch，检查 sampled MTP 前向、反向和参数更新。"""
+    device = resolve_mtp_smoke_device(device)
+    tokenizer = DummyTokenizer()
+    model = _make_model(
+        tokenizer,
+        hidden_size=8,
+        future_steps=3,
+        lambda_future=0.1,
+        future_decay=0.5,
+        future_head_rank=4,
+        future_num_candidates=16,
+        future_random_negatives=4,
+        future_tail_negatives=2,
+        future_graph_candidates=2,
+        future_tail_token_ids=(13, 14),
+    )
+    model.model = TrainableTinyLM()
+    model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    batches = [
+        (
+            torch.tensor([[10, 11, 13, 2]], device=device),
+            torch.tensor([[1.0, 0.5, 2.0, 1.0]], device=device),
+        ),
+        (
+            torch.tensor([[11, 13, 14, 2]], device=device),
+            torch.tensor([[0.5, 2.0, 2.0, 1.0]], device=device),
+        ),
+    ]
+    for input_ids, tail_weights in batches:
+        evidence_ids, evidence_mask = pad_token_matrix([[13, 14]], pad_value=-1)
+        optimizer.zero_grad(set_to_none=True)
+        loss, nll, feat, future = model.train_step(
+            input_ids,
+            evidence_token_ids=evidence_ids.to(device),
+            evidence_token_mask=evidence_mask.to(device),
+            tail_position_weights=tail_weights,
+        )
+        assert torch.isfinite(loss)
+        assert torch.isfinite(nll)
+        assert feat.item() == 0.0
+        assert future.item() > 0.0
+        loss.backward()
+        assert any(
+            parameter.grad is not None
+            for parameter in model.future_adapters.parameters()
+        )
+        optimizer.step()
+
+
+def test_two_batch_sampled_mtp_training_smoke_cpu():
+    run_two_batch_sampled_mtp_training_smoke("cpu")
 
 
 def test_train_step_masks_prompt_tokens_from_nll_targets():
@@ -407,7 +535,7 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     fixed_logits[prompt_len, 11] = 0.5
     model.model = FixedFullLogitLM(logits=fixed_logits)
 
-    loss, nll, feat = model.train_step(
+    loss, nll, feat, future = model.train_step(
         input_ids,
         profile_ids=profile_ids,
         profile_mask=torch.ones_like(profile_ids),
@@ -423,6 +551,7 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(loss, manual_nll)
     assert feat.item() == 0.0
+    assert future.item() == 0.0
 
 
 def test_evidence_bonus_reduces_nll_for_gold_evidence_token():
@@ -443,12 +572,12 @@ def test_evidence_bonus_reduces_nll_for_gold_evidence_token():
     bonus_model = _make_model(tokenizer, evidence_bonus=0.5)
     bonus_model.model = FixedLogitLM(logits=fixed_logits)
 
-    _loss0, nll0, _feat0 = no_bonus_model.train_step(
+    _loss0, nll0, _feat0, _future0 = no_bonus_model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
     )
-    _loss_bonus, nll_bonus, _feat_bonus = bonus_model.train_step(
+    _loss_bonus, nll_bonus, _feat_bonus, _future_bonus = bonus_model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
@@ -481,7 +610,7 @@ def test_feature_learning_loss_uses_matched_target_positions():
     feature_position_mask = torch.tensor([[False, True]])
     feature_position_weights = torch.tensor([[0.0, 1.0]])
 
-    loss, nll, feat = model.train_step(
+    loss, nll, feat, future = model.train_step(
         input_ids,
         feature_position_mask=feature_position_mask,
         feature_position_weights=feature_position_weights,
@@ -493,6 +622,7 @@ def test_feature_learning_loss_uses_matched_target_positions():
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(feat, manual_feat)
     assert torch.allclose(loss, manual_nll + 0.5 * feat)
+    assert future.item() == 0.0
 
 
 def test_batch_graphs():
@@ -578,7 +708,7 @@ def test_graph_collater_batch_layout_without_auxiliary_fields():
     assert batch[0].tolist() == [[10, 11]]
     assert "node_token_ids" in batch[6]
     assert isinstance(batch[7], list)
-    assert batch[7] == ["user_a"]
+    assert batch[10] == ["user_a"]
     assert batch[11].shape[0] == 1
     assert batch[11].dtype == torch.bool
     assert batch[12].dtype == torch.float32
@@ -683,10 +813,13 @@ def test_standalone_default_paths_are_graph_local():
     args = build_arg_parser().parse_args([])
     graph_root = ROOT.resolve()
     assert Path(args.data_dir).resolve() == graph_root / "data"
-    assert Path(args.profile_dir).resolve() == graph_root / "user_profiles_structured"
+    assert Path(args.profile_dir).resolve() == graph_root / "data" / "profiles"
     model_candidates = {path.resolve() for path in qwen3_4b_model_candidates()}
     assert Path(args.model_path).resolve() in model_candidates
-    assert Path(args.embedding_model_path).resolve() == graph_root / "models" / "qwen3-embedding-0.6b"
+    assert (
+        Path(args.embedding_model_path).resolve()
+        == graph_root / "pretrain_llm" / "qwen3-embedding-0.6b"
+    )
     assert args.dataset_name == "Amazon/MoviesAndTV_corsa_filtered_small_15pct/"
 
 
@@ -863,6 +996,10 @@ def test_devices_arg_defaults():
     assert args.oom_fallback == "auto"
     assert args.embedding_device == "auto"
     assert args.memory_warn_gib == 24.0
+    assert args.future_steps == 3
+    assert args.lambda_future == 0.1
+    assert args.future_decay == 0.5
+    assert args.future_num_candidates == 1024
 
 
 def test_resolve_devices_string_prefers_cuda1():
@@ -1012,6 +1149,13 @@ def test_embedding_cache_corruption_recovery():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run graph_llm smoke tests")
+    parser.add_argument(
+        "--smoke_device",
+        default="auto",
+        help="MTP 两批 smoke test 设备：auto、cpu、cuda:0 或 cuda:1",
+    )
+    smoke_args = parser.parse_args()
     test_directed_edges_and_leakage()
     test_selector_shapes()
     test_tail_stats_and_selector_bce()
@@ -1020,6 +1164,8 @@ if __name__ == "__main__":
     test_generation_controls_filter_evidence_and_block_repeats()
     test_train_step_uses_tail_weighted_sft()
     test_two_batch_tail_sft_training_smoke()
+    test_future_candidate_set_contains_all_shifted_targets()
+    run_two_batch_sampled_mtp_training_smoke(smoke_args.smoke_device)
     test_batch_graphs()
     test_stratified_tail_node_selection()
     test_tokenize_text_list_padding()

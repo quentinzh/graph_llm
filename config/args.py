@@ -193,6 +193,20 @@ def build_arg_parser():
     parser.add_argument("--lambda_feat", default=0.0001, type=float)
     parser.add_argument("--lambda_selector", default=0.1, type=float)
     parser.add_argument(
+        "--future_steps",
+        default=3,
+        type=int,
+        help="训练期预测总步数；1 关闭 MTP，3 表示额外预测 t+2/t+3",
+    )
+    parser.add_argument("--lambda_future", default=0.1, type=float)
+    parser.add_argument("--future_decay", default=0.5, type=float)
+    parser.add_argument("--future_head_rank", default=64, type=int)
+    parser.add_argument("--future_num_candidates", default=1024, type=int)
+    parser.add_argument("--future_random_negatives", default=256, type=int)
+    parser.add_argument("--future_tail_negatives", default=128, type=int)
+    parser.add_argument("--future_graph_candidates", default=128, type=int)
+    parser.add_argument("--future_temperature", default=1.0, type=float)
+    parser.add_argument(
         "--selector_feature_positive_weight",
         default=3.0,
         type=float,
