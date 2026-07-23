@@ -121,6 +121,7 @@ def run_repr_contrast_stage(
             raw_users,
             _feature_position_mask,
             _feature_position_weights,
+            _review_contexts,
         ) = unpack_batch(batch, device)
         prompt_ids, prompt_mask = build_batch_prompt_tensors(
             item_titles, raw_users, tokenizer, args, device

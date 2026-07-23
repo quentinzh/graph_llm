@@ -54,6 +54,7 @@ from graph_llm.dataload.dataloader import (
     tokenizer_special_ids,
 )
 from graph_llm.dataload.embeddings import QwenEmbeddingEncoder
+from graph_llm.dataload.review_memory import ReviewMemoryBank, mark_review_history
 from graph_llm.dataload.sampler import LengthBucketSampler
 from graph_llm.dataload.tail_stats import (
     TailTokenStats,
@@ -591,7 +592,7 @@ def apply_force(args, split_indices):
             _remove_path(embedding_fold)
 
         ckpt_prefix = ckpt_dir / dataset_name / fold
-        for suffix in ("model", "selector.bin"):
+        for suffix in ("model", "selector.bin", "review_prefix.bin"):
             _remove_path(Path(f"{ckpt_prefix}{suffix}"))
         for suffix in ("graph_config.json",):
             _remove_path(Path(f"{ckpt_prefix}{suffix}"))
@@ -625,6 +626,7 @@ def unpack_batch(batch, device):
         raw_users,
         feature_position_mask,
         feature_position_weights,
+        review_contexts,
     ) = batch
     graph_tensors = {k: v.to(device) for k, v in graph_tensors.items()}
     return (
@@ -641,6 +643,7 @@ def unpack_batch(batch, device):
         raw_users,
         feature_position_mask.to(device),
         feature_position_weights.to(device),
+        review_contexts,
     )
 
 
@@ -679,6 +682,7 @@ def compute_batch_selector_tensors(
     feature_position_weights=None,
     tail_stats: TailTokenStats | None = None,
     compute_selector_loss: bool = False,
+    item_embs=None,
 ):
     node_token_ids = graph_tensors["node_token_ids"]
     if node_token_ids.numel() == 0:
@@ -693,7 +697,8 @@ def compute_batch_selector_tensors(
     if unique_emb.device != device:
         unique_emb = unique_emb.to(device)
 
-    item_embs = embedding_encoder.encode_texts(item_texts)
+    if item_embs is None:
+        item_embs = embedding_encoder.encode_texts(item_texts)
     if item_embs.device != device:
         item_embs = item_embs.to(device)
     id_to_idx = {tid: idx for idx, tid in enumerate(unique_ids)}
@@ -761,6 +766,25 @@ def compute_batch_selector_tensors(
     )
 
 
+def prepare_batch_review_tensors(
+    review_memory,
+    embedding_encoder,
+    item_texts,
+    review_contexts,
+    device,
+):
+    """只编码一次当前物品，并同时供 selector 与评论 Top-K 检索复用。"""
+    item_embs = embedding_encoder.encode_texts(item_texts)
+    if item_embs.device != device:
+        item_embs = item_embs.to(device)
+    review_tensors = (
+        review_memory.prepare_batch(review_contexts, item_embs, device)
+        if review_memory is not None
+        else {}
+    )
+    return item_embs, review_tensors
+
+
 def cuda_memory_status(devices):
     if not torch.cuda.is_available():
         return "CUDA memory: n/a"
@@ -819,9 +843,10 @@ def train_epoch(
     tokenizer,
     tail_stats,
     tail_weight_table,
+    review_memory,
 ):
     model.train()
-    loss_log, nll_log, selector_log, feat_log, future_log = [], [], [], [], []
+    loss_log, nll_log, selector_log, feat_log, prefix_feat_log = [], [], [], [], []
     last_batch_idx = -1
     for cuda_device in cuda_devices:
         if cuda_device.type == "cuda":
@@ -844,8 +869,16 @@ def train_epoch(
             raw_users,
             feature_position_mask,
             feature_position_weights,
+            review_contexts,
         ) = unpack_batch(batch, device)
 
+        item_embs, review_tensors = prepare_batch_review_tensors(
+            review_memory,
+            embedding_encoder,
+            item_texts,
+            review_contexts,
+            device,
+        )
         evidence_token_ids, evidence_token_mask, selector_loss = (
             compute_batch_selector_tensors(
                 model,
@@ -860,6 +893,7 @@ def train_epoch(
                 feature_position_weights=feature_position_weights,
                 tail_stats=tail_stats,
                 compute_selector_loss=True,
+                item_embs=item_embs,
             )
         )
         generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
@@ -872,7 +906,7 @@ def train_epoch(
 
         try:
             with autocast():
-                base_loss, nll_loss, feat_loss, future_loss = model.train_step(
+                base_loss, nll_loss, feat_loss, prefix_feat_loss = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
@@ -885,13 +919,14 @@ def train_epoch(
                     feature_position_mask=feature_position_mask,
                     feature_position_weights=feature_position_weights,
                     tail_position_weights=tail_weight_table[input_ids],
+                    **review_tensors,
                 )
                 loss = base_loss + float(args.lambda_selector) * selector_loss
             loss_log.append(loss.item())
             nll_log.append(nll_loss.item())
             selector_log.append(selector_loss.detach().item())
             feat_log.append(feat_loss.item())
-            future_log.append(future_loss.item())
+            prefix_feat_log.append(prefix_feat_loss.item())
             scaler.scale(loss / args.accumulation_steps).backward()
         except torch.cuda.OutOfMemoryError:
             msg = (
@@ -915,13 +950,13 @@ def train_epoch(
                 f"Train Epoch: {epoch} "
                 f"Loss: {np.mean(loss_log):.6f}\tTailSFT: {np.mean(nll_log):.6f}\t"
                 f"Selector: {np.mean(selector_log):.6f}\tFeat: {np.mean(feat_log):.6f}\t"
-                f"Future: {np.mean(future_log):.6f}\t"
+                f"PrefixFeat: {np.mean(prefix_feat_log):.6f}\t"
                 f"{cuda_memory_status(cuda_devices)}"
             )
             print(msg)
             write_log(log_name, msg)
             maybe_warn_cuda_memory(cuda_devices, args.memory_warn_gib)
-            loss_log, nll_log, selector_log, feat_log, future_log = [], [], [], [], []
+            loss_log, nll_log, selector_log, feat_log, prefix_feat_log = [], [], [], [], []
 
         if args.max_train_batches and (batch_idx + 1) >= args.max_train_batches:
             print(f"Stopping train epoch early after {args.max_train_batches} batches (--max_train_batches).")
@@ -946,6 +981,7 @@ def valid_step(
     tokenizer,
     tail_stats,
     tail_weight_table,
+    review_memory,
     epoch=0,
 ):
     model.eval()
@@ -966,7 +1002,15 @@ def valid_step(
                 raw_users,
                 feature_position_mask,
                 feature_position_weights,
+                review_contexts,
             ) = unpack_batch(batch, device)
+            item_embs, review_tensors = prepare_batch_review_tensors(
+                review_memory,
+                embedding_encoder,
+                item_texts,
+                review_contexts,
+                device,
+            )
             evidence_token_ids, evidence_token_mask, selector_loss = (
                 compute_batch_selector_tensors(
                     model,
@@ -981,6 +1025,7 @@ def valid_step(
                     feature_position_weights=feature_position_weights,
                     tail_stats=tail_stats,
                     compute_selector_loss=True,
+                    item_embs=item_embs,
                 )
             )
             generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
@@ -991,7 +1036,7 @@ def valid_step(
                 device,
             )
             with autocast():
-                base_loss, _nll, _feat, _future = model.train_step(
+                base_loss, _nll, _feat, _prefix_feat = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
                     profile_mask=profile_mask,
@@ -1004,6 +1049,7 @@ def valid_step(
                     feature_position_mask=feature_position_mask,
                     feature_position_weights=feature_position_weights,
                     tail_position_weights=tail_weight_table[input_ids],
+                    **review_tensors,
                 )
                 loss = base_loss + float(args.lambda_selector) * selector_loss
             loss_log.append(loss.item())
@@ -1177,7 +1223,19 @@ def append_eval_metrics(
     }
 
 
-def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, output_dir, word, tokenizer, args):
+def test_step(
+    model,
+    embedding_encoder,
+    dataloader,
+    device,
+    log_name,
+    dataset,
+    output_dir,
+    word,
+    tokenizer,
+    args,
+    review_memory,
+):
     model.eval()
     predict, label = [], []
     max_batches = int(getattr(args, "max_eval_batches", 0) or 0)
@@ -1197,7 +1255,15 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 raw_users,
                 _feature_position_mask,
                 _feature_position_weights,
+                review_contexts,
             ) = unpack_batch(batch, device)
+            item_embs, review_tensors = prepare_batch_review_tensors(
+                review_memory,
+                embedding_encoder,
+                item_texts,
+                review_contexts,
+                device,
+            )
             evidence_token_ids, evidence_token_mask, _ = compute_batch_selector_tensors(
                 model,
                 embedding_encoder,
@@ -1207,6 +1273,7 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 tokenizer,
                 args,
                 device,
+                item_embs=item_embs,
             )
             generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
                 item_titles,
@@ -1226,6 +1293,7 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
                 device,
                 evidence_token_ids=evidence_token_ids,
                 evidence_token_mask=evidence_token_mask,
+                **review_tensors,
             )
             predict.extend(generated)
             label.extend(input_ids.tolist())
@@ -1277,6 +1345,7 @@ def test_step(model, embedding_encoder, dataloader, device, log_name, dataset, o
 
 def load_best_checkpoint(model, ckpt_prefix, device):
     selector_path = ckpt_prefix + "selector.bin"
+    review_prefix_path = ckpt_prefix + "review_prefix.bin"
     adapter_path = ckpt_prefix + "model"
     if not os.path.isdir(adapter_path):
         raise FileNotFoundError(f"No checkpoint found at {ckpt_prefix}")
@@ -1285,6 +1354,21 @@ def load_best_checkpoint(model, ckpt_prefix, device):
     if os.path.exists(selector_path):
         state = torch.load(selector_path, map_location=device, weights_only=False)
         model.evidence_selector.load_state_dict(state)
+    if os.path.exists(review_prefix_path):
+        state = torch.load(
+            review_prefix_path,
+            map_location=device,
+            weights_only=False,
+        )
+        if model.user_review_projector is not None and "user" in state:
+            model.user_review_projector.load_state_dict(state["user"])
+        if model.item_review_projector is not None and "item" in state:
+            model.item_review_projector.load_state_dict(state["item"])
+    elif model.user_review_projector is not None or model.item_review_projector is not None:
+        raise FileNotFoundError(
+            f"Review-prefix checkpoint not found at {review_prefix_path}. "
+            "The new review-prefix architecture requires fresh training."
+        )
 
 
 def _run_split(
@@ -1307,6 +1391,15 @@ def _run_split(
     train_dataset, valid_dataset, test_dataset = dataset_split(dataset, split_index, args)
     train_history = train_dataset.copy()
     train_valid_history = pd.concat([train_dataset, valid_dataset], axis=0)
+    review_train_history = mark_review_history(train_dataset, "train")
+    review_train_valid_history = pd.concat(
+        [
+            review_train_history,
+            mark_review_history(valid_dataset, "validation"),
+        ],
+        axis=0,
+        ignore_index=True,
+    )
     tail_stats = build_tail_token_stats(
         train_dataset["text"].tolist(),
         tokenizer=tokenizer,
@@ -1550,6 +1643,28 @@ def _run_split(
             "Embedding encoder is not resident on the embedding device; "
             "dual-GPU memory benefit is reduced."
         )
+    review_prefix_enabled = (
+        args.user_review_prefix_len > 0 or args.item_review_prefix_len > 0
+    )
+    review_train_memory = None
+    review_test_memory = None
+    if review_prefix_enabled:
+        review_cache_root = (
+            Path(args.embedding_cache_dir)
+            / args.dataset_name.replace("/", "__")
+            / str(split_index)
+            / "review_banks"
+        )
+        review_test_memory = ReviewMemoryBank.build_or_load(
+            review_train_valid_history,
+            embedding_encoder,
+            cache_path=review_cache_root / "train_valid.pt",
+            top_k_user=args.review_top_k_user,
+            top_k_item=args.review_top_k_item,
+            encode_batch_size=args.review_embedding_batch_size,
+            rebuild=args.rebuild_graph_cache,
+        )
+        review_train_memory = review_test_memory.subset({"train"})
     cuda_devices = training_cuda_devices(
         primary_device,
         embedding_device,
@@ -1560,13 +1675,6 @@ def _run_split(
         hidden_dim=args.selector_hidden,
         gnn_layers=args.gnn_layers,
     ).to(device)
-    future_tail_token_ids = sorted(
-        int(token_id)
-        for token_id in tail_stats.doc_freq
-        if 0 <= int(token_id) < model_llm.config.vocab_size
-        and tail_stats.is_tail(int(token_id))
-    )
-
     model = GraphEvidenceCIER(
         tokenizer=tokenizer,
         vocab_size=model_llm.config.vocab_size,
@@ -1574,16 +1682,12 @@ def _run_split(
         lambda_feat=args.lambda_feat,
         evidence_bonus=args.evidence_bonus,
         hidden_size=model_llm.config.hidden_size,
-        future_steps=args.future_steps,
-        lambda_future=args.lambda_future,
-        future_decay=args.future_decay,
-        future_head_rank=args.future_head_rank,
-        future_num_candidates=args.future_num_candidates,
-        future_random_negatives=args.future_random_negatives,
-        future_tail_negatives=args.future_tail_negatives,
-        future_graph_candidates=args.future_graph_candidates,
-        future_temperature=args.future_temperature,
-        future_tail_token_ids=future_tail_token_ids,
+        review_embedding_dim=embedding_encoder.hidden_size,
+        user_review_prefix_len=args.user_review_prefix_len,
+        item_review_prefix_len=args.item_review_prefix_len,
+        review_attention_heads=args.review_attention_heads,
+        review_prefix_dropout=args.review_prefix_dropout,
+        lambda_prefix_feature=args.lambda_prefix_feature,
         max_consecutive_token_repeat=args.max_consecutive_token_repeat,
         pad_token_id=tokenizer_pad_id(tokenizer),
         eos_token_ids=tokenizer_eos_ids(tokenizer),
@@ -1606,13 +1710,20 @@ def _run_split(
             "lr": args.learning_rate / 10,
         },
     ]
-    future_parameters = [
-        p for p in model.future_adapters.parameters() if p.requires_grad
+    review_prefix_parameters = [
+        parameter
+        for projector in (
+            model.user_review_projector,
+            model.item_review_projector,
+        )
+        if projector is not None
+        for parameter in projector.parameters()
+        if parameter.requires_grad
     ]
-    if future_parameters:
-        # 未来预测头从头训练，使用与 selector 相同的学习率。
+    if review_prefix_parameters:
+        # 两个 projector 从头训练，学习率与 selector 一致。
         optimizer_groups.insert(1, {
-            "params": future_parameters,
+            "params": review_prefix_parameters,
             "lr": args.learning_rate,
         })
     optimizer = AdamW(optimizer_groups)
@@ -1653,13 +1764,13 @@ def _run_split(
             f"top_m_evidence:{args.top_m_evidence} evidence_bonus:{args.evidence_bonus}\n"
         )
         f.write(
-            f"future_steps:{args.future_steps} lambda_future:{args.lambda_future} "
-            f"future_decay:{args.future_decay} future_head_rank:{args.future_head_rank} "
-            f"future_num_candidates:{args.future_num_candidates} "
-            f"future_random_negatives:{args.future_random_negatives} "
-            f"future_tail_negatives:{args.future_tail_negatives} "
-            f"future_graph_candidates:{args.future_graph_candidates} "
-            f"future_temperature:{args.future_temperature}\n"
+            f"review_top_k_user:{args.review_top_k_user} "
+            f"review_top_k_item:{args.review_top_k_item} "
+            f"user_review_prefix_len:{args.user_review_prefix_len} "
+            f"item_review_prefix_len:{args.item_review_prefix_len} "
+            f"review_attention_heads:{args.review_attention_heads} "
+            f"review_prefix_dropout:{args.review_prefix_dropout} "
+            f"lambda_prefix_feature:{args.lambda_prefix_feature}\n"
         )
         f.write(
             f"tail_alpha:{args.tail_alpha} tail_weight_min:{args.tail_weight_min} "
@@ -1668,7 +1779,7 @@ def _run_split(
         )
         f.write(
             "losses: tail-weighted SFT + lambda_selector * sampled selector BCE "
-            "+ lambda_feat * feature loss + lambda_future * sampled MTP; "
+            "+ lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; "
             "graph UL disabled\n"
         )
         f.write(
@@ -1700,7 +1811,7 @@ def _run_split(
             train_epoch(
                 model, embedding_encoder, train_loader, optimizer, device,
                 cuda_devices, epoch, args, scaler, log_name, tokenizer,
-                tail_stats, tail_weight_table,
+                tail_stats, tail_weight_table, review_train_memory,
             )
             collate_train.cur_step = len(train_loader) * (epoch + 1)
             valid_loss = valid_step(
@@ -1713,6 +1824,7 @@ def _run_split(
                 tokenizer,
                 tail_stats,
                 tail_weight_table,
+                review_train_memory,
                 epoch=epoch,
             )
             validation_generation_path = str(
@@ -1729,6 +1841,7 @@ def _run_split(
                 args.word,
                 tokenizer,
                 args,
+                review_train_memory,
             )
             valid_fmr = float(valid_metrics.get("FMR", 0.0))
             with open(log_name, "a+", encoding="utf-8") as f:
@@ -1741,6 +1854,21 @@ def _run_split(
                     best_fmr = valid_fmr
                     model.model.save_pretrained(ckpt_prefix + "model")
                     torch.save(model.evidence_selector.state_dict(), ckpt_prefix + "selector.bin")
+                    torch.save(
+                        {
+                            "user": (
+                                model.user_review_projector.state_dict()
+                                if model.user_review_projector is not None
+                                else None
+                            ),
+                            "item": (
+                                model.item_review_projector.state_dict()
+                                if model.item_review_projector is not None
+                                else None
+                            ),
+                        },
+                        ckpt_prefix + "review_prefix.bin",
+                    )
                     with open(ckpt_prefix + "graph_config.json", "w", encoding="utf-8") as cf:
                         json.dump(vars(args), cf, indent=2, default=str)
             if early_stop == 0:
@@ -1751,7 +1879,7 @@ def _run_split(
         model.model.gradient_checkpointing_disable()
     test_step(
         model, embedding_encoder, test_loader, device, log_name,
-        test_set, generation_path, args.word, tokenizer, args,
+        test_set, generation_path, args.word, tokenizer, args, review_test_memory,
     )
     torch.cuda.empty_cache()
 
@@ -1762,11 +1890,14 @@ def run(args):
         args.max_profile_tokens
         + args.max_target_item_tokens
         + args.max_generation_prompt_tokens
+        + args.user_review_prefix_len
+        + args.item_review_prefix_len
     )
     if _prompt_budget > 512:
         print(
             f"WARNING: prompt token budget ({_prompt_budget}) > 512. "
             f"profile={args.max_profile_tokens} item={args.max_target_item_tokens} "
+            f"review_prefix={args.user_review_prefix_len + args.item_review_prefix_len} "
             f"generation={args.max_generation_prompt_tokens}"
         )
     args.model_path = resolve_local_model_path(

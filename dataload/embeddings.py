@@ -202,9 +202,17 @@ class QwenEmbeddingEncoder(nn.Module):
             self.cache = EmbeddingCache(self._cache_dir / f"dim{self.hidden_size}")
 
     @torch.no_grad()
-    def encode_texts(self, texts: list[str], batch_size: int = 16) -> torch.Tensor:
+    def encode_texts(
+        self,
+        texts: list[str],
+        batch_size: int = 16,
+        *,
+        use_cache: bool = True,
+    ) -> torch.Tensor:
         if not texts:
             return torch.empty((0, self.hidden_size), device=self.device)
+        if not use_cache:
+            return self._encode_texts_no_cache(texts, batch_size=batch_size)
 
         cached_vectors = []
         missing_texts: list[str] = []

@@ -142,6 +142,7 @@ def _generate_train_outputs(
             raw_users,
             _feature_position_mask,
             _feature_position_weights,
+            _review_contexts,
         ) = unpack_batch(batch, device)
         evidence_ids, evidence_mask, _ = compute_batch_selector_tensors(
             model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device
@@ -469,6 +470,7 @@ def precompute_evidence_and_reference(
             _raw_users,
             _feature_position_mask,
             _feature_position_weights,
+            _review_contexts,
         ) = unpack_batch(batch, device)
         evidence_ids, evidence_mask, _ = compute_batch_selector_tensors(
             model, embedding_encoder, graphs, graph_tensors, item_texts, tokenizer, args, device
@@ -499,6 +501,7 @@ def precompute_evidence_and_reference(
             raw_users,
             _feature_position_mask,
             _feature_position_weights,
+            _review_contexts,
         ) = unpack_batch(batch, device)
         evidence_ids, evidence_mask = _batch_evidence_from_map(
             [int(group["local_idx"]) for group in group_batch], evidence_map, device
@@ -667,6 +670,7 @@ def run_simdpo_stage(
             raw_users,
             _feature_position_mask,
             _feature_position_weights,
+            _review_contexts,
         ) = unpack_batch(batch, device)
         # 方案 3：直接读缓存 evidence，跳过 compute_batch_selector_tensors。
         evidence_ids, evidence_mask = _batch_evidence_from_cache(group_batch, device)

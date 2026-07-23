@@ -34,6 +34,7 @@ from graph_llm.aux.prompt_utils import (
     tokenize_text_list,
 )
 from graph_llm.dataload.dataloader import GraphCollater
+from graph_llm.dataload.review_memory import ReviewMemoryBank, mark_review_history
 from graph_llm.dataload.tail_stats import TailTokenStats, build_tail_token_stats
 from graph_llm.metrics.metrics import bleu_score, rouge_score
 from graph_llm.models.selector import EvidenceSelector, pad_token_matrix
@@ -302,12 +303,14 @@ def test_prompt_length_accounts_for_new_segments():
     profile_ids = torch.tensor([[1, 2, 3]])
     target_item_ids = torch.tensor([[4, 5]])
     generation_prompt_ids = torch.tensor([[8, 9, 10]])
+    review_prefixes = torch.randn(1, 4, 8)
     prompt_len = model._prompt_length(
-        profile_ids,
-        target_item_ids,
-        generation_prompt_ids,
+        profile_ids=profile_ids,
+        review_prefixes=review_prefixes,
+        target_item_ids=target_item_ids,
+        generation_prompt_ids=generation_prompt_ids,
     )
-    assert prompt_len == 3 + 2 + 3
+    assert prompt_len == 3 + 4 + 2 + 3
 
 
 def test_generation_controls_filter_evidence_and_block_repeats():
@@ -343,7 +346,7 @@ def test_train_step_uses_adjusted_logits_nll():
 
     input_ids = torch.tensor([[10, 11]])
     evidence_token_ids, evidence_token_mask = pad_token_matrix([[10]], pad_value=-1)
-    loss, nll, feat, future = model.train_step(
+    loss, nll, feat, prefix_feat = model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
@@ -354,7 +357,7 @@ def test_train_step_uses_adjusted_logits_nll():
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(loss, manual_nll)
     assert feat.item() == 0.0
-    assert future.item() == 0.0
+    assert prefix_feat.item() == 0.0
 
 
 def test_train_step_uses_tail_weighted_sft():
@@ -367,7 +370,7 @@ def test_train_step_uses_tail_weighted_sft():
 
     input_ids = torch.tensor([[10, 11]])
     tail_weights = torch.tensor([[2.0, 0.5]])
-    loss, nll, feat, future = model.train_step(
+    loss, nll, feat, prefix_feat = model.train_step(
         input_ids,
         tail_position_weights=tail_weights,
     )
@@ -378,7 +381,7 @@ def test_train_step_uses_tail_weighted_sft():
     assert torch.allclose(nll, expected)
     assert torch.allclose(loss, expected)
     assert feat.item() == 0.0
-    assert future.item() == 0.0
+    assert prefix_feat.item() == 0.0
 
 
 def test_two_batch_tail_sft_training_smoke():
@@ -393,7 +396,7 @@ def test_two_batch_tail_sft_training_smoke():
     ]
     for input_ids, tail_weights in batches:
         optimizer.zero_grad()
-        loss, _nll, _feat, _future = model.train_step(
+        loss, _nll, _feat, _prefix_feat = model.train_step(
             input_ids,
             tail_position_weights=tail_weights,
         )
@@ -402,8 +405,8 @@ def test_two_batch_tail_sft_training_smoke():
         optimizer.step()
 
 
-def resolve_mtp_smoke_device(requested="auto"):
-    """为两批 MTP smoke test 选择设备，并保留显式 CPU/GPU 接口。"""
+def resolve_review_prefix_smoke_device(requested="auto"):
+    """为两批 prefix smoke test 选择设备，并保留显式 CPU/GPU 接口。"""
     requested = str(requested).strip().lower()
     if requested != "auto":
         device = torch.device(requested)
@@ -421,92 +424,98 @@ def resolve_mtp_smoke_device(requested="auto"):
     return torch.device("cpu")
 
 
-def test_future_candidate_set_contains_all_shifted_targets():
+def test_review_memory_excludes_current_training_target():
+    history = mark_review_history(
+        pd.DataFrame({
+            "raw_user": ["u1", "u1", "u2"],
+            "raw_item": ["i1", "i2", "i1"],
+            "review_text": ["target", "user history", "item history"],
+        }),
+        "train",
+    )
+    bank = ReviewMemoryBank(
+        embeddings=torch.eye(3, 4),
+        raw_users=history["raw_user"].tolist(),
+        raw_items=history["raw_item"].tolist(),
+        source_splits=history["_review_source_split"].tolist(),
+        local_indices=history["_review_local_idx"].tolist(),
+        top_k_user=2,
+        top_k_item=2,
+    )
+    review_tensors = bank.prepare_batch(
+        [{
+            "raw_user": "u1",
+            "raw_item": "i1",
+            "split_name": "train",
+            "local_idx": 0,
+        }],
+        torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        torch.device("cpu"),
+    )
+    # 当前 target 的 one-hot 向量为第 0 维；两条检索结果都不能包含它。
+    assert review_tensors["user_review_embeddings"][0, :, 0].sum().item() == 0.0
+    assert review_tensors["item_review_embeddings"][0, :, 0].sum().item() == 0.0
+    assert review_tensors["user_review_mask"].sum().item() == 1
+    assert review_tensors["item_review_mask"].sum().item() == 1
+
+
+def run_two_batch_review_prefix_training_smoke(device="auto"):
+    """以 batch_size=8 恰好跑两个 batch，检查 prefix 前向、反向和参数更新。"""
+    device = resolve_review_prefix_smoke_device(device)
     tokenizer = DummyTokenizer()
     model = _make_model(
         tokenizer,
         hidden_size=8,
-        future_steps=3,
-        lambda_future=0.1,
-        future_head_rank=4,
-        future_num_candidates=16,
-        future_random_negatives=4,
-        future_tail_negatives=2,
-        future_graph_candidates=2,
-        future_tail_token_ids=(13, 14),
-    )
-    input_ids = torch.tensor([
-        [10, 11, 13, 2],
-        [10, 14, 2, 0],
-    ])
-    evidence_ids, evidence_mask = pad_token_matrix([[18, 19], [18]], pad_value=-1)
-    candidate_ids, candidate_log_q = model._build_future_candidates(
-        input_ids,
-        evidence_token_ids=evidence_ids,
-        evidence_token_mask=evidence_mask,
-    )
-
-    # t+2/t+3 的全部非 PAD 目标，以及 graph 困难候选都必须出现。
-    expected = {2, 11, 13, 14, 18, 19}
-    assert expected.issubset(set(candidate_ids.tolist()))
-    assert candidate_ids.numel() <= model.future_num_candidates
-    assert candidate_ids.numel() == candidate_log_q.numel()
-    assert torch.isfinite(candidate_log_q).all()
-
-
-def run_two_batch_sampled_mtp_training_smoke(device="auto"):
-    """恰好运行两个 batch，检查 sampled MTP 前向、反向和参数更新。"""
-    device = resolve_mtp_smoke_device(device)
-    tokenizer = DummyTokenizer()
-    model = _make_model(
-        tokenizer,
-        hidden_size=8,
-        future_steps=3,
-        lambda_future=0.1,
-        future_decay=0.5,
-        future_head_rank=4,
-        future_num_candidates=16,
-        future_random_negatives=4,
-        future_tail_negatives=2,
-        future_graph_candidates=2,
-        future_tail_token_ids=(13, 14),
+        review_embedding_dim=4,
+        user_review_prefix_len=2,
+        item_review_prefix_len=2,
+        review_attention_heads=2,
+        review_prefix_dropout=0.0,
+        lambda_prefix_feature=0.1,
     )
     model.model = TrainableTinyLM()
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    batch_size = 8
+    # 列表长度固定为 2，确保 smoke test 不会意外跑完整 epoch。
     batches = [
-        (
-            torch.tensor([[10, 11, 13, 2]], device=device),
-            torch.tensor([[1.0, 0.5, 2.0, 1.0]], device=device),
-        ),
-        (
-            torch.tensor([[11, 13, 14, 2]], device=device),
-            torch.tensor([[0.5, 2.0, 2.0, 1.0]], device=device),
-        ),
+        torch.randint(3, 20, (batch_size, 4), device=device),
+        torch.randint(3, 20, (batch_size, 4), device=device),
     ]
-    for input_ids, tail_weights in batches:
-        evidence_ids, evidence_mask = pad_token_matrix([[13, 14]], pad_value=-1)
+    for input_ids in batches:
+        input_ids[:, -1] = 2
+        user_mask = torch.ones((batch_size, 3), dtype=torch.bool, device=device)
+        item_mask = torch.ones((batch_size, 5), dtype=torch.bool, device=device)
+        review_tensors = {
+            "user_review_embeddings": torch.randn(batch_size, 3, 4, device=device),
+            "user_review_mask": user_mask,
+            "item_review_embeddings": torch.randn(batch_size, 5, 4, device=device),
+            "item_review_mask": item_mask,
+            "item_review_query": torch.randn(batch_size, 4, device=device),
+            "user_review_query": torch.randn(batch_size, 4, device=device),
+        }
+        feature_weights = torch.zeros_like(input_ids, dtype=torch.float32)
+        feature_weights[:, 1] = 2.0
         optimizer.zero_grad(set_to_none=True)
-        loss, nll, feat, future = model.train_step(
+        loss, nll, feat, prefix_feat = model.train_step(
             input_ids,
-            evidence_token_ids=evidence_ids.to(device),
-            evidence_token_mask=evidence_mask.to(device),
-            tail_position_weights=tail_weights,
+            feature_position_weights=feature_weights,
+            **review_tensors,
         )
         assert torch.isfinite(loss)
         assert torch.isfinite(nll)
         assert feat.item() == 0.0
-        assert future.item() > 0.0
+        assert prefix_feat.item() > 0.0
         loss.backward()
         assert any(
             parameter.grad is not None
-            for parameter in model.future_adapters.parameters()
+            for parameter in model.user_review_projector.parameters()
         )
         optimizer.step()
 
 
-def test_two_batch_sampled_mtp_training_smoke_cpu():
-    run_two_batch_sampled_mtp_training_smoke("cpu")
+def test_two_batch_review_prefix_training_smoke_cpu():
+    run_two_batch_review_prefix_training_smoke("cpu")
 
 
 def test_train_step_masks_prompt_tokens_from_nll_targets():
@@ -524,9 +533,9 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     )
 
     prompt_len = model._prompt_length(
-        profile_ids,
-        target_item_ids,
-        generation_prompt_ids,
+        profile_ids=profile_ids,
+        target_item_ids=target_item_ids,
+        generation_prompt_ids=generation_prompt_ids,
     )
     total_len = prompt_len + input_ids.shape[1]
     fixed_logits = torch.zeros(total_len, 32)
@@ -535,7 +544,7 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     fixed_logits[prompt_len, 11] = 0.5
     model.model = FixedFullLogitLM(logits=fixed_logits)
 
-    loss, nll, feat, future = model.train_step(
+    loss, nll, feat, prefix_feat = model.train_step(
         input_ids,
         profile_ids=profile_ids,
         profile_mask=torch.ones_like(profile_ids),
@@ -551,7 +560,7 @@ def test_train_step_masks_prompt_tokens_from_nll_targets():
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(loss, manual_nll)
     assert feat.item() == 0.0
-    assert future.item() == 0.0
+    assert prefix_feat.item() == 0.0
 
 
 def test_evidence_bonus_reduces_nll_for_gold_evidence_token():
@@ -572,12 +581,12 @@ def test_evidence_bonus_reduces_nll_for_gold_evidence_token():
     bonus_model = _make_model(tokenizer, evidence_bonus=0.5)
     bonus_model.model = FixedLogitLM(logits=fixed_logits)
 
-    _loss0, nll0, _feat0, _future0 = no_bonus_model.train_step(
+    _loss0, nll0, _feat0, _prefix_feat0 = no_bonus_model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
     )
-    _loss_bonus, nll_bonus, _feat_bonus, _future_bonus = bonus_model.train_step(
+    _loss_bonus, nll_bonus, _feat_bonus, _prefix_feat_bonus = bonus_model.train_step(
         input_ids,
         evidence_token_ids=evidence_token_ids,
         evidence_token_mask=evidence_token_mask,
@@ -610,7 +619,7 @@ def test_feature_learning_loss_uses_matched_target_positions():
     feature_position_mask = torch.tensor([[False, True]])
     feature_position_weights = torch.tensor([[0.0, 1.0]])
 
-    loss, nll, feat, future = model.train_step(
+    loss, nll, feat, prefix_feat = model.train_step(
         input_ids,
         feature_position_mask=feature_position_mask,
         feature_position_weights=feature_position_weights,
@@ -622,7 +631,7 @@ def test_feature_learning_loss_uses_matched_target_positions():
     assert torch.allclose(nll, manual_nll)
     assert torch.allclose(feat, manual_feat)
     assert torch.allclose(loss, manual_nll + 0.5 * feat)
-    assert future.item() == 0.0
+    assert prefix_feat.item() == 0.0
 
 
 def test_batch_graphs():
@@ -704,7 +713,7 @@ def test_graph_collater_batch_layout_without_auxiliary_fields():
             "split_name": "test",
         }
     ])
-    assert len(batch) == 13
+    assert len(batch) == 14
     assert batch[0].tolist() == [[10, 11]]
     assert "node_token_ids" in batch[6]
     assert isinstance(batch[7], list)
@@ -712,6 +721,12 @@ def test_graph_collater_batch_layout_without_auxiliary_fields():
     assert batch[11].shape[0] == 1
     assert batch[11].dtype == torch.bool
     assert batch[12].dtype == torch.float32
+    assert batch[13] == [{
+        "raw_user": "user_a",
+        "raw_item": "item_a",
+        "split_name": "test",
+        "local_idx": 0,
+    }]
 
 
 def test_graph_collater_feature_mask_matches_spaced_keyword_variant():
@@ -996,10 +1011,11 @@ def test_devices_arg_defaults():
     assert args.oom_fallback == "auto"
     assert args.embedding_device == "auto"
     assert args.memory_warn_gib == 24.0
-    assert args.future_steps == 3
-    assert args.lambda_future == 0.1
-    assert args.future_decay == 0.5
-    assert args.future_num_candidates == 1024
+    assert args.review_top_k_user == 16
+    assert args.review_top_k_item == 32
+    assert args.user_review_prefix_len == 4
+    assert args.item_review_prefix_len == 4
+    assert args.lambda_prefix_feature == 0.1
 
 
 def test_resolve_devices_string_prefers_cuda1():
@@ -1153,7 +1169,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--smoke_device",
         default="auto",
-        help="MTP 两批 smoke test 设备：auto、cpu、cuda:0 或 cuda:1",
+        help="prefix 两批 smoke test 设备：auto、cpu、cuda:0 或 cuda:1",
     )
     smoke_args = parser.parse_args()
     test_directed_edges_and_leakage()
@@ -1164,8 +1180,8 @@ if __name__ == "__main__":
     test_generation_controls_filter_evidence_and_block_repeats()
     test_train_step_uses_tail_weighted_sft()
     test_two_batch_tail_sft_training_smoke()
-    test_future_candidate_set_contains_all_shifted_targets()
-    run_two_batch_sampled_mtp_training_smoke(smoke_args.smoke_device)
+    test_review_memory_excludes_current_training_target()
+    run_two_batch_review_prefix_training_smoke(smoke_args.smoke_device)
     test_batch_graphs()
     test_stratified_tail_node_selection()
     test_tokenize_text_list_padding()

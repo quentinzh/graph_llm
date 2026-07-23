@@ -197,6 +197,7 @@ class GraphCollater:
         item_texts = []
         item_titles = []
         raw_users = []
+        review_contexts = []
         max_length = max([
             min(self.word, max(len(x["text"]), 1))
             for x in data
@@ -219,7 +220,16 @@ class GraphCollater:
             title, _description, item_text = item_meta_from_row(raw_item, self.item_meta)
             item_titles.append(title)
             item_texts.append(item_text)
-            raw_users.append(str(x["raw_user"]) if "raw_user" in x else str(x["user"]))
+            raw_user = str(x["raw_user"]) if "raw_user" in x else str(x["user"])
+            raw_users.append(raw_user)
+            # 评论检索只依赖样本身份，不把真实解释文本传给模型。
+            # split_name + local_idx 用于训练时精确排除当前评论，避免标签泄漏。
+            review_contexts.append({
+                "raw_user": raw_user,
+                "raw_item": raw_item,
+                "split_name": str(x.get("split_name", self.split_name)),
+                "local_idx": int(x["local_idx"]),
+            })
 
         self.cur_step += 1
 
@@ -278,6 +288,7 @@ class GraphCollater:
             raw_users,
             feature_position_mask,
             feature_position_weights,
+            review_contexts,
         )
 
 

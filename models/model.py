@@ -21,29 +21,82 @@ CONTROL_STOPWORDS = {
 }
 
 
-class FutureTokenAdapter(nn.Module):
-    """用低秩残差映射把共享隐藏状态变换到指定未来步。"""
+class TargetAwareReviewProjector(nn.Module):
+    """用目标条件化的多查询注意力把 Top-K 评论压缩为 soft prefix。"""
 
-    def __init__(self, hidden_size: int, rank: int, eps: float = 1e-6):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        prefix_len: int,
+        num_heads: int,
+        dropout: float,
+    ):
         super().__init__()
-        self.input_norm = nn.RMSNorm(hidden_size, eps=eps)
-        self.down_proj = nn.Linear(hidden_size, rank, bias=False)
-        self.up_proj = nn.Linear(rank, hidden_size, bias=False)
-        self.output_norm = nn.RMSNorm(hidden_size, eps=eps)
-        self.activation = nn.SiLU()
+        if input_dim % num_heads != 0:
+            raise ValueError("review embedding dim must be divisible by attention heads")
+        self.prefix_len = int(prefix_len)
+        self.review_norm = nn.LayerNorm(input_dim)
+        self.query_norm = nn.LayerNorm(input_dim)
+        self.queries = nn.Parameter(torch.empty(self.prefix_len, input_dim))
+        self.condition_proj = nn.Linear(input_dim, input_dim, bias=False)
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=input_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.output_norm = nn.LayerNorm(input_dim)
+        self.output_proj = nn.Linear(input_dim, output_dim)
+        self.type_embedding = nn.Parameter(torch.zeros(1, 1, output_dim))
+        self.dropout = nn.Dropout(dropout)
+        # 初始只给 LLM 很弱的扰动，训练中再自动提高 prefix 强度。
+        self.gate = nn.Parameter(torch.tensor(-2.0))
         self.reset_parameters()
 
     def reset_parameters(self):
-        self.input_norm.reset_parameters()
-        self.output_norm.reset_parameters()
-        nn.init.xavier_uniform_(self.down_proj.weight)
-        # 从近似恒等映射开始，避免随机辅助头在训练初期强烈扰动共享主干。
-        nn.init.zeros_(self.up_proj.weight)
+        nn.init.normal_(self.queries, std=0.02)
+        nn.init.xavier_uniform_(self.condition_proj.weight)
+        nn.init.xavier_uniform_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+        nn.init.zeros_(self.type_embedding)
 
-    def forward(self, hidden_states):
-        residual = hidden_states
-        update = self.up_proj(self.activation(self.down_proj(self.input_norm(hidden_states))))
-        return self.output_norm(residual + update)
+    def forward(self, review_embeddings, review_mask, target_query):
+        if review_embeddings.ndim != 3:
+            raise ValueError("review_embeddings must have shape [B, K, D]")
+        if review_mask.shape != review_embeddings.shape[:2]:
+            raise ValueError("review_mask must match review_embeddings[:2]")
+        if target_query.shape != (
+            review_embeddings.shape[0],
+            review_embeddings.shape[2],
+        ):
+            raise ValueError("target_query must have shape [B, D]")
+
+        valid_mask = review_mask.bool()
+        has_history = valid_mask.any(dim=1)
+        safe_mask = valid_mask.clone()
+        safe_reviews = review_embeddings.float().clone()
+        # MultiheadAttention 不接受整行都被 mask；冷启动样本放入零占位，输出随后清零。
+        if (~has_history).any():
+            safe_mask[~has_history, 0] = True
+            safe_reviews[~has_history, 0] = 0
+
+        reviews = self.review_norm(safe_reviews)
+        conditioned = self.query_norm(target_query.float())
+        queries = self.queries.unsqueeze(0).expand(reviews.shape[0], -1, -1)
+        queries = queries + self.condition_proj(conditioned).unsqueeze(1)
+        attended, _ = self.cross_attention(
+            query=queries,
+            key=reviews,
+            value=reviews,
+            key_padding_mask=~safe_mask,
+            need_weights=False,
+        )
+        prefix = self.output_proj(self.output_norm(attended)) + self.type_embedding
+        prefix = torch.sigmoid(self.gate) * self.dropout(prefix)
+        prefix = prefix * has_history[:, None, None].to(prefix.dtype)
+        prefix_mask = has_history[:, None].expand(-1, self.prefix_len)
+        return prefix, prefix_mask
 
 
 class GraphEvidenceCIER(nn.Module):
@@ -57,16 +110,12 @@ class GraphEvidenceCIER(nn.Module):
         lambda_feat=0.0001,
         evidence_bonus=0.1,
         hidden_size=None,
-        future_steps=1,
-        lambda_future=0.0,
-        future_decay=0.5,
-        future_head_rank=64,
-        future_num_candidates=1024,
-        future_random_negatives=256,
-        future_tail_negatives=128,
-        future_graph_candidates=128,
-        future_temperature=1.0,
-        future_tail_token_ids=None,
+        review_embedding_dim=None,
+        user_review_prefix_len=0,
+        item_review_prefix_len=0,
+        review_attention_heads=8,
+        review_prefix_dropout=0.1,
+        lambda_prefix_feature=0.0,
         max_consecutive_token_repeat=3,
         pad_token_id=0,
         eos_token_ids=None,
@@ -80,97 +129,48 @@ class GraphEvidenceCIER(nn.Module):
         self.lambda_feat = float(lambda_feat)
         self.evidence_bonus = float(evidence_bonus)
         self.hidden_size = int(hidden_size) if hidden_size is not None else None
-        self.future_steps = int(future_steps)
-        self.lambda_future = float(lambda_future)
-        self.future_decay = float(future_decay)
-        self.future_head_rank = int(future_head_rank)
-        self.future_num_candidates = int(future_num_candidates)
-        self.future_random_negatives = int(future_random_negatives)
-        self.future_tail_negatives = int(future_tail_negatives)
-        self.future_graph_candidates = int(future_graph_candidates)
-        self.future_temperature = float(future_temperature)
+        self.review_embedding_dim = (
+            int(review_embedding_dim) if review_embedding_dim is not None else None
+        )
+        self.user_review_prefix_len = int(user_review_prefix_len)
+        self.item_review_prefix_len = int(item_review_prefix_len)
+        self.lambda_prefix_feature = float(lambda_prefix_feature)
         self.max_consecutive_token_repeat = int(max_consecutive_token_repeat)
         self.pad_token_id = int(pad_token_id)
         self.eos_token_ids = tuple(int(x) for x in (eos_token_ids or ()))
         self.special_token_ids = tuple(int(x) for x in special_token_ids)
 
-        if self.future_steps < 1:
-            raise ValueError("future_steps must be at least 1")
-        if self.future_steps > 1 and self.hidden_size is None:
-            raise ValueError("hidden_size is required when future_steps > 1")
-        if self.lambda_future < 0:
-            raise ValueError("lambda_future must be non-negative")
-        if not 0 < self.future_decay <= 1:
-            raise ValueError("future_decay must be in (0, 1]")
-        if self.future_head_rank < 1:
-            raise ValueError("future_head_rank must be positive")
-        if self.future_num_candidates < 1:
-            raise ValueError("future_num_candidates must be positive")
-        if min(
-            self.future_random_negatives,
-            self.future_tail_negatives,
-            self.future_graph_candidates,
-        ) < 0:
-            raise ValueError("future candidate counts must be non-negative")
-        if self.future_temperature <= 0:
-            raise ValueError("future_temperature must be positive")
-
-        self.future_adapters = nn.ModuleList()
-        if self.future_steps > 1:
-            self.future_adapters.extend(
-                FutureTokenAdapter(self.hidden_size, self.future_head_rank)
-                for _ in range(self.future_steps - 1)
+        if self.user_review_prefix_len < 0 or self.item_review_prefix_len < 0:
+            raise ValueError("review prefix lengths must be non-negative")
+        if self.lambda_prefix_feature < 0:
+            raise ValueError("lambda_prefix_feature must be non-negative")
+        prefix_enabled = self.user_review_prefix_len > 0 or self.item_review_prefix_len > 0
+        if prefix_enabled and (self.hidden_size is None or self.review_embedding_dim is None):
+            raise ValueError(
+                "hidden_size and review_embedding_dim are required when review prefix is enabled"
             )
-
-        tail_ids = sorted({
-            int(token_id)
-            for token_id in (future_tail_token_ids or ())
-            if 0 <= int(token_id) < self.vocab_size
-        })
-        tail_tensor = torch.tensor(tail_ids, dtype=torch.long)
-        tail_mask = torch.zeros(self.vocab_size, dtype=torch.bool)
-        if tail_ids:
-            tail_mask[tail_tensor] = True
-        # 采样池属于训练期临时状态，不需要写入推理 checkpoint。
-        self.register_buffer("future_tail_token_ids", tail_tensor, persistent=False)
-        self.register_buffer("future_tail_token_mask", tail_mask, persistent=False)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
-        for adapter in self.future_adapters:
-            adapter.reset_parameters()
-
-    def _future_loss_enabled(self):
-        return self.future_steps > 1 and self.lambda_future > 0
-
-    def _future_head_device(self):
-        if not self.future_adapters:
-            return self._llm_input_device()
-        return next(self.future_adapters.parameters()).device
-
-    def _output_embedding_weight(self):
-        output_embeddings = self.model.get_output_embeddings()
-        if output_embeddings is not None and hasattr(output_embeddings, "weight"):
-            return output_embeddings.weight
-        # 部分轻量测试模型没有显式 output head，此时退化为 tied input embedding。
-        return self._embed_tokens().weight
-
-    def _future_hidden_capture_module(self):
-        """优先定位最终归一化层，避免返回所有 Transformer 层隐藏状态。"""
-        if self.model is None:
-            return None
-        base_model = self.model
-        if hasattr(base_model, "get_base_model"):
-            base_model = base_model.get_base_model()
-        if hasattr(base_model, "get_decoder"):
-            decoder = base_model.get_decoder()
-            norm = getattr(decoder, "norm", None)
-            if norm is not None:
-                return norm
-        return None
+        self.user_review_projector = (
+            TargetAwareReviewProjector(
+                self.review_embedding_dim,
+                self.hidden_size,
+                self.user_review_prefix_len,
+                review_attention_heads,
+                review_prefix_dropout,
+            )
+            if self.user_review_prefix_len > 0
+            else None
+        )
+        self.item_review_projector = (
+            TargetAwareReviewProjector(
+                self.review_embedding_dim,
+                self.hidden_size,
+                self.item_review_prefix_len,
+                review_attention_heads,
+                review_prefix_dropout,
+            )
+            if self.item_review_prefix_len > 0
+            else None
+        )
 
     def _embed_tokens(self):
         return self.model.get_input_embeddings()
@@ -223,6 +223,7 @@ class GraphEvidenceCIER(nn.Module):
         self,
         input_ids=None,
         profile_ids=None,
+        review_prefixes=None,
         target_item_ids=None,
         generation_prompt_ids=None,
     ):
@@ -232,6 +233,8 @@ class GraphEvidenceCIER(nn.Module):
         parts = []
         if profile_ids is not None and profile_ids.numel() > 0:
             parts.append(embeddings(profile_ids.to(llm_device)).to(dtype=llm_dtype))
+        if review_prefixes is not None and review_prefixes.numel() > 0:
+            parts.append(review_prefixes.to(device=llm_device, dtype=llm_dtype))
         if target_item_ids is not None and target_item_ids.numel() > 0:
             parts.append(embeddings(target_item_ids.to(llm_device)).to(dtype=llm_dtype))
         if generation_prompt_ids is not None and generation_prompt_ids.numel() > 0:
@@ -246,6 +249,7 @@ class GraphEvidenceCIER(nn.Module):
         self,
         input_ids=None,
         profile_mask=None,
+        review_prefix_mask=None,
         target_item_mask=None,
         generation_prompt_mask=None,
         batch_size=None,
@@ -254,6 +258,8 @@ class GraphEvidenceCIER(nn.Module):
         masks = []
         if profile_mask is not None and profile_mask.numel() > 0:
             masks.append(profile_mask.to(device))
+        if review_prefix_mask is not None and review_prefix_mask.numel() > 0:
+            masks.append(review_prefix_mask.long().to(device))
         if target_item_mask is not None and target_item_mask.numel() > 0:
             masks.append(target_item_mask.to(device))
         if generation_prompt_mask is not None and generation_prompt_mask.numel() > 0:
@@ -265,17 +271,119 @@ class GraphEvidenceCIER(nn.Module):
     def _prompt_length(
         self,
         profile_ids=None,
+        review_prefixes=None,
         target_item_ids=None,
         generation_prompt_ids=None,
     ):
         total = 0
         if profile_ids is not None:
             total += profile_ids.shape[1]
+        if review_prefixes is not None:
+            total += review_prefixes.shape[1]
         if target_item_ids is not None:
             total += target_item_ids.shape[1]
         if generation_prompt_ids is not None:
             total += generation_prompt_ids.shape[1]
         return total
+
+    def build_review_prefixes(
+        self,
+        *,
+        user_review_embeddings=None,
+        user_review_mask=None,
+        item_review_embeddings=None,
+        item_review_mask=None,
+        item_review_query=None,
+        user_review_query=None,
+    ):
+        """分别构造用户偏好和物品属性 prefix，保持两套参数不共享。"""
+        supplied = (
+            user_review_embeddings,
+            user_review_mask,
+            item_review_embeddings,
+            item_review_mask,
+            item_review_query,
+            user_review_query,
+        )
+        # 兼容不使用评论前缀的旧辅助阶段；主训练/验证/测试始终会传入完整张量。
+        if all(value is None for value in supplied):
+            return None, None
+        prefixes, masks = [], []
+        if self.user_review_projector is not None:
+            if any(
+                value is None
+                for value in (
+                    user_review_embeddings,
+                    user_review_mask,
+                    item_review_query,
+                )
+            ):
+                raise ValueError("user review prefix inputs are incomplete")
+            prefix, mask = self.user_review_projector(
+                user_review_embeddings,
+                user_review_mask,
+                item_review_query,
+            )
+            prefixes.append(prefix)
+            masks.append(mask)
+        if self.item_review_projector is not None:
+            if any(
+                value is None
+                for value in (
+                    item_review_embeddings,
+                    item_review_mask,
+                    user_review_query,
+                )
+            ):
+                raise ValueError("item review prefix inputs are incomplete")
+            prefix, mask = self.item_review_projector(
+                item_review_embeddings,
+                item_review_mask,
+                user_review_query,
+            )
+            prefixes.append(prefix)
+            masks.append(mask)
+        if not prefixes:
+            return None, None
+        return torch.cat(prefixes, dim=1), torch.cat(masks, dim=1)
+
+    def _prefix_feature_alignment_loss(
+        self,
+        review_prefixes,
+        review_prefix_mask,
+        input_ids,
+        feature_position_weights,
+    ):
+        """让聚合 prefix 靠近当前真实 feature 的 LLM 词向量语义。"""
+        if (
+            review_prefixes is None
+            or review_prefix_mask is None
+            or feature_position_weights is None
+        ):
+            device = input_ids.device if input_ids is not None else self._llm_input_device()
+            return torch.zeros((), dtype=torch.float32, device=device)
+
+        prefix_mask = review_prefix_mask.to(review_prefixes.device).float()
+        prefix_mean = (
+            review_prefixes.float() * prefix_mask.unsqueeze(-1)
+        ).sum(dim=1) / prefix_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+
+        embedding_layer = self._embed_tokens()
+        embedding_device = self._llm_input_device()
+        target_embeddings = embedding_layer(input_ids.to(embedding_device)).detach().float()
+        feature_mask = (
+            feature_position_weights.to(embedding_device) >= 2.0
+        ) & (input_ids.to(embedding_device) != self.pad_token_id)
+        feature_mean = (
+            target_embeddings * feature_mask.unsqueeze(-1).float()
+        ).sum(dim=1) / feature_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+
+        prefix_mean = prefix_mean.to(embedding_device)
+        valid = (prefix_mask.sum(dim=1) > 0).to(embedding_device) & feature_mask.any(dim=1)
+        if not valid.any():
+            return target_embeddings.new_tensor(0.0)
+        similarity = F.cosine_similarity(prefix_mean[valid], feature_mean[valid], dim=-1)
+        return (1.0 - similarity).mean()
 
     def _feature_learning_loss(
         self,
@@ -308,213 +416,6 @@ class GraphEvidenceCIER(nn.Module):
             return nll.new_tensor(0.0)
         return (nll * weights).sum() / denom
 
-    @torch.no_grad()
-    def _build_future_candidates(
-        self,
-        input_ids,
-        evidence_token_ids=None,
-        evidence_token_mask=None,
-        device=None,
-    ):
-        """构造 batch 共享候选集及其采样概率修正项。
-
-        所有 t+2/t+3 正样本都会被强制保留；随机、tail 和 graph token
-        仅用于补充负样本。候选上限不足时宁可临时扩容，也不会丢失正样本。
-        """
-        device = device or input_ids.device
-        input_ids = input_ids.to(device)
-        positive_parts = []
-        for offset in range(1, self.future_steps):
-            if input_ids.shape[1] <= offset:
-                continue
-            targets = input_ids[:, offset:]
-            positive_parts.append(targets[targets != self.pad_token_id])
-        if not positive_parts:
-            empty_ids = torch.empty(0, dtype=torch.long, device=device)
-            empty_log_q = torch.empty(0, dtype=torch.float32, device=device)
-            return empty_ids, empty_log_q
-        positive_ids = torch.unique(torch.cat(positive_parts), sorted=True)
-
-        extra_parts = []
-        if (
-            evidence_token_ids is not None
-            and evidence_token_mask is not None
-            and self.future_graph_candidates > 0
-        ):
-            graph_ids = evidence_token_ids.to(device)[evidence_token_mask.to(device).bool()]
-            graph_ids = graph_ids[(graph_ids >= 0) & (graph_ids < self.vocab_size)]
-            if graph_ids.numel() > 0:
-                extra_parts.append(torch.unique(graph_ids)[:self.future_graph_candidates])
-
-        if self.future_random_negatives > 0:
-            # 多抽一倍后过滤特殊 token，以尽量得到足量且有效的随机负样本。
-            draw_count = max(self.future_random_negatives * 2, self.future_random_negatives)
-            random_ids = torch.randint(0, self.vocab_size, (draw_count,), device=device)
-            ignored = torch.tensor(
-                sorted(self._ignored_token_ids()),
-                dtype=torch.long,
-                device=device,
-            )
-            if ignored.numel() > 0:
-                random_ids = random_ids[~torch.isin(random_ids, ignored)]
-            random_ids = torch.unique(random_ids)[:self.future_random_negatives]
-            if random_ids.numel() > 0:
-                extra_parts.append(random_ids)
-
-        tail_pool = self.future_tail_token_ids.to(device)
-        if self.future_tail_negatives > 0 and tail_pool.numel() > 0:
-            tail_indices = torch.randint(
-                0,
-                tail_pool.numel(),
-                (self.future_tail_negatives,),
-                device=device,
-            )
-            extra_parts.append(torch.unique(tail_pool[tail_indices]))
-
-        if extra_parts:
-            extra_ids = torch.unique(torch.cat(extra_parts), sorted=True)
-            extra_ids = extra_ids[~torch.isin(extra_ids, positive_ids)]
-            remaining = max(self.future_num_candidates - positive_ids.numel(), 0)
-            extra_ids = extra_ids[:remaining]
-            candidate_ids = torch.unique(
-                torch.cat([positive_ids, extra_ids]),
-                sorted=True,
-            )
-        else:
-            candidate_ids = positive_ids
-
-        # q(v) 使用 uniform 与 tail-uniform 的混合分布。统一对所有候选修正，
-        # 使过采样的 tail token 不会仅因为出现频率高而成为过强负样本。
-        random_count = float(self.future_random_negatives)
-        tail_count = float(self.future_tail_negatives if tail_pool.numel() > 0 else 0)
-        sample_count = random_count + tail_count
-        if sample_count <= 0:
-            uniform_mix, tail_mix = 1.0, 0.0
-        else:
-            # 保留至少 10% 的均匀参考概率，让任意强制正样本都有非零 q(v)。
-            uniform_mix = max(random_count / sample_count, 0.1)
-            tail_mix = 1.0 - uniform_mix
-        q = torch.full(
-            (candidate_ids.numel(),),
-            uniform_mix / max(float(self.vocab_size), 1.0),
-            dtype=torch.float32,
-            device=device,
-        )
-        if tail_mix > 0:
-            tail_mask = self.future_tail_token_mask.to(device).index_select(0, candidate_ids)
-            q = q + tail_mask.to(q.dtype) * (tail_mix / float(tail_pool.numel()))
-        return candidate_ids, torch.log(q.clamp_min(1e-12))
-
-    def _response_hidden_states(
-        self,
-        output,
-        logits,
-        logits_to_keep,
-        captured_final_hidden=None,
-        profile_ids=None,
-        target_item_ids=None,
-        generation_prompt_ids=None,
-    ):
-        final_hidden = captured_final_hidden
-        if final_hidden is None:
-            hidden_states = output.get("hidden_states")
-            if not hidden_states:
-                raise RuntimeError(
-                    "Sampled MTP requires the LLM to expose its final hidden state. "
-                    "Neither a final-norm hook nor output_hidden_states is available."
-                )
-            final_hidden = hidden_states[-1]
-        if logits.shape[1] == logits_to_keep:
-            response_hidden = final_hidden[:, -logits_to_keep:-1, :]
-        else:
-            prompt_len = self._prompt_length(
-                profile_ids,
-                target_item_ids,
-                generation_prompt_ids,
-            )
-            response_hidden = final_hidden[:, prompt_len - 1:-1, :]
-        expected_length = logits_to_keep - 1
-        if response_hidden.shape[1] != expected_length:
-            raise ValueError(
-                "MTP response hidden length mismatch: "
-                f"expected {expected_length}, got {response_hidden.shape[1]}"
-            )
-        return response_hidden
-
-    def _future_prediction_loss(
-        self,
-        response_hidden,
-        input_ids,
-        evidence_token_ids=None,
-        evidence_token_mask=None,
-        tail_position_weights=None,
-    ):
-        if not self._future_loss_enabled() or input_ids.shape[1] < 2:
-            return response_hidden.new_tensor(0.0)
-
-        future_device = self._future_head_device()
-        candidate_ids, candidate_log_q = self._build_future_candidates(
-            input_ids,
-            evidence_token_ids=evidence_token_ids,
-            evidence_token_mask=evidence_token_mask,
-            device=future_device,
-        )
-        if candidate_ids.numel() == 0:
-            return response_hidden.new_tensor(0.0)
-
-        output_weight = self._output_embedding_weight()
-        candidate_embeddings = output_weight.index_select(
-            0,
-            candidate_ids.to(output_weight.device),
-        ).to(future_device)
-        candidate_log_q = candidate_log_q.to(future_device)
-        response_hidden = response_hidden.to(future_device)
-        targets_all = input_ids.to(future_device)
-        tail_weights_all = (
-            tail_position_weights.to(future_device)
-            if tail_position_weights is not None
-            else None
-        )
-
-        weighted_losses = []
-        horizon_weights = []
-        for future_step in range(2, self.future_steps + 1):
-            offset = future_step - 1
-            if targets_all.shape[1] <= offset:
-                continue
-            targets = targets_all[:, offset:]
-            valid_mask = targets != self.pad_token_id
-            if not valid_mask.any():
-                continue
-
-            # 同一个 h_t 分别对齐 y_{t+2}、y_{t+3}，不读取中间未来 token。
-            hidden = response_hidden[:, :targets.shape[1], :][valid_mask]
-            target_ids = targets[valid_mask]
-            future_repr = self.future_adapters[future_step - 2](hidden)
-            logits = F.linear(future_repr, candidate_embeddings)
-            logits = logits.float() / self.future_temperature
-            logits = logits - candidate_log_q.float().unsqueeze(0)
-
-            target_columns = torch.searchsorted(candidate_ids, target_ids)
-            if not torch.equal(candidate_ids[target_columns], target_ids):
-                raise RuntimeError("Future candidate set is missing a positive target token")
-            token_loss = F.cross_entropy(logits, target_columns, reduction="none")
-            if tail_weights_all is None:
-                token_weights = torch.ones_like(token_loss)
-            else:
-                token_weights = tail_weights_all[:, offset:][valid_mask].to(token_loss.dtype)
-            horizon_loss = (
-                (token_loss * token_weights).sum()
-                / token_weights.sum().clamp_min(1.0)
-            )
-            gamma = self.future_decay ** (future_step - 2)
-            weighted_losses.append(gamma * horizon_loss)
-            horizon_weights.append(gamma)
-
-        if not weighted_losses:
-            return response_hidden.new_tensor(0.0)
-        return torch.stack(weighted_losses).sum() / sum(horizon_weights)
-
     def train_step(
         self,
         input_ids,
@@ -529,10 +430,25 @@ class GraphEvidenceCIER(nn.Module):
         feature_position_mask=None,
         feature_position_weights=None,
         tail_position_weights=None,
+        user_review_embeddings=None,
+        user_review_mask=None,
+        item_review_embeddings=None,
+        item_review_mask=None,
+        item_review_query=None,
+        user_review_query=None,
     ):
+        review_prefixes, review_prefix_mask = self.build_review_prefixes(
+            user_review_embeddings=user_review_embeddings,
+            user_review_mask=user_review_mask,
+            item_review_embeddings=item_review_embeddings,
+            item_review_mask=item_review_mask,
+            item_review_query=item_review_query,
+            user_review_query=user_review_query,
+        )
         inputs_embeds = self.get_embedding(
             input_ids=input_ids,
             profile_ids=profile_ids,
+            review_prefixes=review_prefixes,
             target_item_ids=target_item_ids,
             generation_prompt_ids=generation_prompt_ids,
         )
@@ -541,54 +457,30 @@ class GraphEvidenceCIER(nn.Module):
         attention_mask = self._attention_mask(
             input_ids=input_ids,
             profile_mask=profile_mask,
+            review_prefix_mask=review_prefix_mask,
             target_item_mask=target_item_mask,
             generation_prompt_mask=generation_prompt_mask,
             batch_size=batch_size,
             device=device,
         )
         logits_to_keep = input_ids.shape[1] + 1
-        need_future_hidden = self._future_loss_enabled()
-        captured_hidden = {}
-        capture_module = (
-            self._future_hidden_capture_module()
-            if need_future_hidden
-            else None
-        )
-        capture_handle = None
-        if capture_module is not None:
-            def _capture_final_hidden(_module, _inputs, module_output):
-                # Qwen3 最终 RMSNorm 输出为 Tensor；兼容少数返回 tuple 的实现。
-                captured_hidden["value"] = (
-                    module_output[0]
-                    if isinstance(module_output, (tuple, list))
-                    else module_output
-                )
-
-            capture_handle = capture_module.register_forward_hook(_capture_final_hidden)
-        request_all_hidden_states = need_future_hidden and capture_module is None
         try:
-            try:
-                output = self.model(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                    logits_to_keep=logits_to_keep,
-                    output_hidden_states=request_all_hidden_states,
-                    return_dict=True,
-                )
-            except TypeError as exc:
-                if "logits_to_keep" not in str(exc):
-                    raise
-                output = self.model(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                    output_hidden_states=request_all_hidden_states,
-                    return_dict=True,
-                )
-        finally:
-            if capture_handle is not None:
-                capture_handle.remove()
+            output = self.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+                logits_to_keep=logits_to_keep,
+                return_dict=True,
+            )
+        except TypeError as exc:
+            if "logits_to_keep" not in str(exc):
+                raise
+            output = self.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+            )
         logits = output["logits"]
 
         if logits.shape[1] == logits_to_keep:
@@ -596,6 +488,7 @@ class GraphEvidenceCIER(nn.Module):
         else:
             prompt_len = self._prompt_length(
                 profile_ids,
+                review_prefixes,
                 target_item_ids,
                 generation_prompt_ids,
             )
@@ -634,32 +527,22 @@ class GraphEvidenceCIER(nn.Module):
         else:
             feat_loss = gen_logits.new_tensor(0.0)
 
-        if need_future_hidden:
-            response_hidden = self._response_hidden_states(
-                output,
-                logits,
-                logits_to_keep,
-                captured_final_hidden=captured_hidden.get("value"),
-                profile_ids=profile_ids,
-                target_item_ids=target_item_ids,
-                generation_prompt_ids=generation_prompt_ids,
-            )
-            future_loss = self._future_prediction_loss(
-                response_hidden,
+        if self.lambda_prefix_feature > 0:
+            prefix_feature_loss = self._prefix_feature_alignment_loss(
+                review_prefixes,
+                review_prefix_mask,
                 input_ids,
-                evidence_token_ids=evidence_token_ids,
-                evidence_token_mask=evidence_token_mask,
-                tail_position_weights=tail_position_weights,
+                feature_position_weights,
             )
         else:
-            future_loss = gen_logits.new_tensor(0.0)
+            prefix_feature_loss = gen_logits.new_tensor(0.0)
 
         total = (
             nll_loss
             + self.lambda_feat * feat_loss
-            + self.lambda_future * future_loss
+            + self.lambda_prefix_feature * prefix_feature_loss
         )
-        return total, nll_loss.detach(), feat_loss.detach(), future_loss.detach()
+        return total, nll_loss.detach(), feat_loss.detach(), prefix_feature_loss.detach()
 
     def forward(
         self,
@@ -670,19 +553,35 @@ class GraphEvidenceCIER(nn.Module):
         target_item_mask=None,
         generation_prompt_ids=None,
         generation_prompt_mask=None,
+        user_review_embeddings=None,
+        user_review_mask=None,
+        item_review_embeddings=None,
+        item_review_mask=None,
+        item_review_query=None,
+        user_review_query=None,
         attention_mask=None,
         kv_cache=None,
     ):
         if kv_cache is None:
+            review_prefixes, review_prefix_mask = self.build_review_prefixes(
+                user_review_embeddings=user_review_embeddings,
+                user_review_mask=user_review_mask,
+                item_review_embeddings=item_review_embeddings,
+                item_review_mask=item_review_mask,
+                item_review_query=item_review_query,
+                user_review_query=user_review_query,
+            )
             inputs_embeds = self.get_embedding(
                 input_ids=input_ids,
                 profile_ids=profile_ids,
+                review_prefixes=review_prefixes,
                 target_item_ids=target_item_ids,
                 generation_prompt_ids=generation_prompt_ids,
             )
             attention_mask = self._attention_mask(
                 input_ids=input_ids,
                 profile_mask=profile_mask,
+                review_prefix_mask=review_prefix_mask,
                 target_item_mask=target_item_mask,
                 generation_prompt_mask=generation_prompt_mask,
                 batch_size=input_ids.shape[0] if input_ids is not None else profile_ids.shape[0],
@@ -791,6 +690,12 @@ class GraphEvidenceCIER(nn.Module):
         device,
         evidence_token_ids=None,
         evidence_token_mask=None,
+        user_review_embeddings=None,
+        user_review_mask=None,
+        item_review_embeddings=None,
+        item_review_mask=None,
+        item_review_query=None,
+        user_review_query=None,
     ):
         text = torch.tensor([[]], dtype=torch.long, device=device)
         last_words = torch.tensor([[]], dtype=torch.long, device=device)
@@ -805,6 +710,12 @@ class GraphEvidenceCIER(nn.Module):
                 target_item_mask=target_item_mask if kv_cache is None else None,
                 generation_prompt_ids=generation_prompt_ids if kv_cache is None else None,
                 generation_prompt_mask=generation_prompt_mask if kv_cache is None else None,
+                user_review_embeddings=user_review_embeddings if kv_cache is None else None,
+                user_review_mask=user_review_mask if kv_cache is None else None,
+                item_review_embeddings=item_review_embeddings if kv_cache is None else None,
+                item_review_mask=item_review_mask if kv_cache is None else None,
+                item_review_query=item_review_query if kv_cache is None else None,
+                user_review_query=user_review_query if kv_cache is None else None,
                 attention_mask=attention_mask,
                 kv_cache=kv_cache,
             )

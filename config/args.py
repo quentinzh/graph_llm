@@ -192,20 +192,24 @@ def build_arg_parser():
     )
     parser.add_argument("--lambda_feat", default=0.0001, type=float)
     parser.add_argument("--lambda_selector", default=0.1, type=float)
+    parser.add_argument("--review_top_k_user", default=16, type=int)
+    parser.add_argument("--review_top_k_item", default=32, type=int)
+    parser.add_argument("--user_review_prefix_len", default=4, type=int)
+    parser.add_argument("--item_review_prefix_len", default=4, type=int)
+    parser.add_argument("--review_attention_heads", default=8, type=int)
+    parser.add_argument("--review_prefix_dropout", default=0.1, type=float)
     parser.add_argument(
-        "--future_steps",
-        default=3,
-        type=int,
-        help="训练期预测总步数；1 关闭 MTP，3 表示额外预测 t+2/t+3",
+        "--lambda_prefix_feature",
+        default=0.1,
+        type=float,
+        help="soft prefix 与当前真实 feature 词向量的语义对齐损失权重",
     )
-    parser.add_argument("--lambda_future", default=0.1, type=float)
-    parser.add_argument("--future_decay", default=0.5, type=float)
-    parser.add_argument("--future_head_rank", default=64, type=int)
-    parser.add_argument("--future_num_candidates", default=1024, type=int)
-    parser.add_argument("--future_random_negatives", default=256, type=int)
-    parser.add_argument("--future_tail_negatives", default=128, type=int)
-    parser.add_argument("--future_graph_candidates", default=128, type=int)
-    parser.add_argument("--future_temperature", default=1.0, type=float)
+    parser.add_argument(
+        "--review_embedding_batch_size",
+        default=64,
+        type=int,
+        help="首次构建冻结评论 embedding 库时的编码 batch size",
+    )
     parser.add_argument(
         "--selector_feature_positive_weight",
         default=3.0,

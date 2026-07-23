@@ -27,12 +27,12 @@ if __name__ == "__main__":
         lambda_feat=1e-2,
         evidence_bonus=0.1,
         top_m_evidence=5,
-        # 训练期 sampled MTP：主 head 预测 t+1，两个轻量 head 预测 t+2/t+3。
-        future_steps=3,
-        lambda_future=0.1,
-        future_decay=0.5,
-        future_head_rank=64,
-        future_num_candidates=1024,
+        # 冻结 0.6B 评论向量 + 两个独立的 target-aware soft-prefix projector。
+        review_top_k_user=16,
+        review_top_k_item=32,
+        user_review_prefix_len=4,
+        item_review_prefix_len=4,
+        lambda_prefix_feature=0.1,
         devices="1",
         model_path=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-4b"),
         embedding_model_path=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-embedding-0.6b"),
