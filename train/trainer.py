@@ -567,7 +567,9 @@ def apply_force(args, split_indices):
     if not args.force:
         return
 
-    from graph_llm.aux.generate_profiles import generate_profiles
+    # ``--force`` 必须与主实验的 LLM profile 保持一致；不要回退到
+    # generate_profiles.py 的规则统计画像，否则会覆盖已有的 Qwen 画像缓存。
+    from graph_llm.aux.generate_llm_profiles import generate_llm_profiles
 
     dataset_name = str(args.dataset_name).strip("/")
     data_dir = Path(args.data_dir)
@@ -597,13 +599,30 @@ def apply_force(args, split_indices):
         for suffix in ("graph_config.json",):
             _remove_path(Path(f"{ckpt_prefix}{suffix}"))
 
-        print(f"--force: regenerating profiles for fold {fold}")
-        generate_profiles(
+        profile_device_id = parse_device_ids(args.devices)[0]
+        profile_device = torch.device(f"cuda:{profile_device_id}")
+        print(
+            f"--force: regenerating Qwen LLM profiles for fold {fold} "
+            f"on {profile_device}"
+        )
+        generate_llm_profiles(
             data_dir=data_dir,
             dataset_name=dataset_name,
             profile_dir=profile_dir,
             fold=fold,
             scopes=["train", "train_valid"],
+            model_path=args.model_path,
+            device=profile_device,
+            # 与独立 profile 脚本的默认配置保持一致：为每位用户按评分分层
+            # 抽取最多 50 条历史交互，由 Qwen3-4B 生成五行结构化画像。
+            cap=50,
+            seed=42,
+            batch_size=16,
+            max_new_tokens=128,
+            max_batch_tokens=24576,
+            max_input_tokens=28000,
+            torch_dtype=args.torch_dtype,
+            overwrite=True,
         )
 
     args.rebuild_dataset_cache = True
