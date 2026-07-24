@@ -29,7 +29,7 @@ if __name__ == "__main__":
         top_m_evidence=5,
         # 冻结 0.6B 评论向量 + 两个独立的 target-aware soft-prefix projector。
         review_top_k_user=16,
-        review_top_k_item=32,
+        review_top_k_item=16,
         user_review_prefix_len=4,
         item_review_prefix_len=4,
         lambda_prefix_feature=0.1,

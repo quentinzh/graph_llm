@@ -1898,11 +1898,12 @@ def _run_split(
     load_best_checkpoint(model, ckpt_prefix, device)
     if args.gradient_checkpointing and hasattr(model.model, "gradient_checkpointing_disable"):
         model.model.gradient_checkpointing_disable()
-    test_step(
+    test_metrics = test_step(
         model, embedding_encoder, test_loader, device, log_name,
         test_set, generation_path, args.word, tokenizer, args, review_test_memory,
     )
     torch.cuda.empty_cache()
+    return test_metrics
 
 def run(args):
     seed_everything(args.seed)
@@ -1955,6 +1956,7 @@ def run(args):
     print(f"Dataset {args.dataset_name}: users={user_num}, items={item_num}, rows={len(dataset)}")
 
     log_name = str(Path(args.log_dir) / args.dataset_name / args.log_name)
+    fold_test_metrics: dict[str, dict] = {}
     for split_index in split_indices:
         last_oom = None
         for plan_idx, plan in enumerate(oom_plans):
@@ -1970,7 +1972,7 @@ def run(args):
                 print(msg)
                 write_log(log_name, msg)
             try:
-                _run_split(
+                test_metrics = _run_split(
                     args,
                     split_index,
                     tokenizer,
@@ -1980,6 +1982,7 @@ def run(args):
                     item_num,
                     skip_token_ids,
                 )
+                fold_test_metrics[str(split_index)] = test_metrics
                 if plan_idx > 0:
                     msg = f"Training succeeded with OOM plan: {plan.name}"
                     print(msg)
@@ -1996,3 +1999,4 @@ def run(args):
                 f"All OOM fallback plans exhausted for fold {split_index}. "
                 f"Last error: {last_oom}"
             ) from last_oom
+    return fold_test_metrics

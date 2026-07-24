@@ -193,7 +193,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_feat", default=0.0001, type=float)
     parser.add_argument("--lambda_selector", default=0.1, type=float)
     parser.add_argument("--review_top_k_user", default=16, type=int)
-    parser.add_argument("--review_top_k_item", default=32, type=int)
+    parser.add_argument("--review_top_k_item", default=16, type=int)
     parser.add_argument("--user_review_prefix_len", default=4, type=int)
     parser.add_argument("--item_review_prefix_len", default=4, type=int)
     parser.add_argument("--review_attention_heads", default=8, type=int)

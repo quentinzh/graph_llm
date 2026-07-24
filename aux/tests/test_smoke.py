@@ -1019,7 +1019,7 @@ def test_devices_arg_defaults():
     assert args.embedding_device == "auto"
     assert args.memory_warn_gib == 24.0
     assert args.review_top_k_user == 16
-    assert args.review_top_k_item == 32
+    assert args.review_top_k_item == 16
     assert args.user_review_prefix_len == 4
     assert args.item_review_prefix_len == 4
     assert args.lambda_prefix_feature == 0.1
