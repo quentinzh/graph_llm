@@ -1693,6 +1693,7 @@ def _run_split(
         embed_dim=embedding_encoder.hidden_size,
         hidden_dim=args.selector_hidden,
         gnn_layers=args.gnn_layers,
+        magnet_q=args.magnet_q,
     ).to(device)
     model = GraphEvidenceCIER(
         tokenizer=tokenizer,
@@ -1780,7 +1781,8 @@ def _run_split(
         f.write(
             f"lambda_selector:{args.lambda_selector} lambda_feat:{args.lambda_feat} "
             f"selector_feature_positive_weight:{args.selector_feature_positive_weight} "
-            f"top_m_evidence:{args.top_m_evidence} evidence_bonus:{args.evidence_bonus}\n"
+            f"top_m_evidence:{args.top_m_evidence} evidence_bonus:{args.evidence_bonus} "
+            f"magnet_q:{args.magnet_q}\n"
         )
         f.write(
             f"review_top_k_user:{args.review_top_k_user} "

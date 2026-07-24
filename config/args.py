@@ -221,6 +221,12 @@ def build_arg_parser():
     parser.add_argument("--max_consecutive_token_repeat", default=3, type=int)
     parser.add_argument("--selector_hidden", default=256, type=int)
     parser.add_argument("--gnn_layers", default=2, type=int)
+    parser.add_argument(
+        "--magnet_q",
+        default=0.15,
+        type=float,
+        help="MagNet magnetic charge in [0, 0.25]; larger values encode edge direction more strongly.",
+    )
     parser.add_argument("--max_graph_nodes", default=512, type=int)
     parser.add_argument("--min_token_count", default=1, type=int)
     parser.add_argument("--tail_alpha", default=0.5, type=float, choices=[0.5])

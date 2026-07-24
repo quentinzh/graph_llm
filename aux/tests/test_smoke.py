@@ -37,7 +37,7 @@ from graph_llm.dataload.dataloader import GraphCollater
 from graph_llm.dataload.review_memory import ReviewMemoryBank, mark_review_history
 from graph_llm.dataload.tail_stats import TailTokenStats, build_tail_token_stats
 from graph_llm.metrics.metrics import bleu_score, rouge_score
-from graph_llm.models.selector import EvidenceSelector, pad_token_matrix
+from graph_llm.models.selector import EvidenceSelector, MagNetConv, pad_token_matrix
 from graph_llm.models.token_graph import (
     ReviewRecord,
     UserTokenGraph,
@@ -228,12 +228,19 @@ def test_selector_shapes():
         in_degree=np.array([0.0, 1.0, 1.0], dtype=np.float32),
         out_degree=np.array([1.0, 1.0, 0.0], dtype=np.float32),
     )
-    selector = EvidenceSelector(embed_dim=8, hidden_dim=16, gnn_layers=2)
+    selector = EvidenceSelector(embed_dim=8, hidden_dim=16, gnn_layers=2, magnet_q=0.15)
     assert selector.input_proj[0].in_features == 8
+    assert all(isinstance(conv, MagNetConv) for conv in selector.convs)
     node_emb = torch.randn(graph.num_nodes, 8)
     item_emb = torch.randn(8)
     scores = selector.forward_single(graph, node_emb, item_emb)
     assert scores.shape == (graph.num_nodes,)
+    empty_scores = selector.forward_single(
+        UserTokenGraph.empty(),
+        torch.empty((0, 8)),
+        item_emb,
+    )
+    assert empty_scores.numel() == 0
     selected = selector.select_evidence(scores, graph, top_m=2)
     assert selected.numel() == 2
 
