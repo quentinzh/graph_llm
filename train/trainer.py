@@ -1232,6 +1232,7 @@ def append_eval_metrics(
     return {
         "BLEU-1": bleu_1,
         "BLEU-4": bleu_4,
+        "USR": usr,
         "Distinct-1": d1,
         "Distinct-2": d2,
         "ENTR": entr,

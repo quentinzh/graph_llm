@@ -34,6 +34,7 @@ DEFAULT_TOP_M_EVIDENCE = 5
 METRIC_COLUMNS = [
     "BLEU-1",
     "BLEU-4",
+    "USR",
     "Distinct-1",
     "Distinct-2",
     "ENTR",
