@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import random
@@ -14,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, TaskType, get_peft_model, load_peft_weights, set_peft_model_state_dict
 from sklearn.preprocessing import LabelEncoder
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
@@ -1363,14 +1364,148 @@ def test_step(
         return append_eval_metrics(log_name, dataset, tokenizer, predict, label, output_dir)
 
 
+def _lora_missing_keys(load_result, adapter_name: str) -> list[str]:
+    """筛出当前 adapter 真正缺失的 LoRA 参数名。"""
+    missing = []
+    for key in getattr(load_result, "missing_keys", []) or []:
+        key_str = str(key)
+        if adapter_name in key_str and ("lora_" in key_str or "lora_A" in key_str or "lora_B" in key_str):
+            missing.append(key_str)
+    return missing
+
+
+def _ensure_adapter_params_on_device(peft_model, adapter_name: str, device) -> None:
+    """把指定 adapter 的参数/缓冲区搬到与主干相同的 device（避免 cuda:1 上挂到 cuda:0）。"""
+    target = torch.device(device)
+    for name, param in peft_model.named_parameters():
+        if adapter_name in name and param.device != target:
+            param.data = param.data.to(target)
+    for name, buf in peft_model.named_buffers():
+        if adapter_name in name and buf.device != target:
+            buf.data = buf.data.to(target)
+
+
+def _adapter_attached_to_all_lora_layers(peft_model, adapter_name: str) -> bool:
+    """检查 adapter 是否已注入到每一个含 LoRA 的线性层。
+
+    若 peft ``active_adapters`` 指向某名字但层内 ``lora_A`` 没有该 key，
+    前向会静默跳过 LoRA，退化成裸基座生成。
+    """
+    saw_lora_layer = False
+    for module in peft_model.modules():
+        lora_a = getattr(module, "lora_A", None)
+        if lora_a is None or not hasattr(lora_a, "keys"):
+            continue
+        keys = list(lora_a.keys())
+        if not keys:
+            continue
+        saw_lora_layer = True
+        if adapter_name not in lora_a:
+            return False
+    return saw_lora_layer
+
+
+def _verify_adapter_matches_disk(peft_model, adapter_name: str, peft_weights: dict) -> None:
+    """确认 adapter 权重已真正写成磁盘 checkpoint（防止 B 仍是零初始化却静默继续）。"""
+    from peft import get_peft_model_state_dict
+
+    if not peft_weights:
+        raise RuntimeError(f"empty LoRA weights while restoring adapter '{adapter_name}'")
+    current = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+    mismatches: list[str] = []
+    for key, disk_tensor in peft_weights.items():
+        if key not in current:
+            mismatches.append(f"missing:{key}")
+            continue
+        disk_f = disk_tensor.detach().float().cpu()
+        cur_f = current[key].detach().float().cpu()
+        if disk_f.shape != cur_f.shape or not torch.allclose(cur_f, disk_f, atol=1e-3, rtol=1e-3):
+            mismatches.append(f"mismatch:{key}")
+        if len(mismatches) >= 8:
+            break
+    if mismatches:
+        raise RuntimeError(
+            f"Adapter '{adapter_name}' weights do not match disk checkpoint; "
+            f"examples: {mismatches}"
+        )
+
+
 def load_best_checkpoint(model, ckpt_prefix, device):
+    """恢复 valid 最优 checkpoint，供最终 test / 下游 SimDPO 使用。
+
+    历史问题：直接 ``load_adapter(..., "best_lora"); set_adapter("best_lora")``
+    在部分 device_map / 非 cuda:0 设置下，新建的 best_lora 可能未完整注入各层
+    ``lora_A``。此时前向 ``active_adapter not in lora_A`` 会被整层跳过，
+    等价于裸基座生成（test USR≈1、百科式长文）。valid 之所以正常，是因为
+    评测时仍走训练中的 ``default`` adapter。
+
+    修复策略：
+    1. 把磁盘 LoRA 权重写回已验证的 ``default``；
+    2. 再同步一份 ``best_lora``（下游切换用）；
+    3. 校验 missing keys / 层注入完整性，并把参数搬到 ``device``；
+    4. 若 best_lora 未完整挂载，则回退激活 default（权重已是 best）。
+    """
     selector_path = ckpt_prefix + "selector.bin"
     review_prefix_path = ckpt_prefix + "review_prefix.bin"
     adapter_path = ckpt_prefix + "model"
     if not os.path.isdir(adapter_path):
         raise FileNotFoundError(f"No checkpoint found at {ckpt_prefix}")
-    model.model.load_adapter(adapter_path, "best_lora")
-    model.model.set_adapter("best_lora")
+
+    device_str = str(device)
+    peft_weights = load_peft_weights(adapter_path, device=device_str)
+
+    # 1) 写回 default：这是训练/valid 一直在用的 adapter 路径
+    if "default" not in model.model.peft_config:
+        raise RuntimeError("Expected PEFT adapter named 'default' after get_peft_model().")
+    default_result = set_peft_model_state_dict(
+        model.model,
+        peft_weights,
+        adapter_name="default",
+    )
+    default_missing = _lora_missing_keys(default_result, "default")
+    if default_missing:
+        raise RuntimeError(
+            "Failed to restore best LoRA into 'default' adapter; "
+            f"missing keys (first 8): {default_missing[:8]}"
+        )
+    _ensure_adapter_params_on_device(model.model, "default", device)
+    _verify_adapter_matches_disk(model.model, "default", peft_weights)
+
+    # 2) 同步 best_lora，供 SimDPO / repr_contrast 的 set_adapter("best_lora") 使用
+    if "best_lora" in model.model.peft_config:
+        # 避免残留半初始化状态：删掉后按 default 的结构重建
+        model.model.delete_adapter("best_lora")
+    best_cfg = copy.deepcopy(model.model.peft_config["default"])
+    best_cfg.inference_mode = True
+    model.model.add_adapter("best_lora", best_cfg)
+    best_result = set_peft_model_state_dict(
+        model.model,
+        peft_weights,
+        adapter_name="best_lora",
+    )
+    best_missing = _lora_missing_keys(best_result, "best_lora")
+    if best_missing:
+        raise RuntimeError(
+            "Failed to restore best LoRA into 'best_lora' adapter; "
+            f"missing keys (first 8): {best_missing[:8]}"
+        )
+    _ensure_adapter_params_on_device(model.model, "best_lora", device)
+    _verify_adapter_matches_disk(model.model, "best_lora", peft_weights)
+
+    # 3) 选择真正挂载完整的 adapter 做推理；default 已是 best 权重，可作安全回退
+    if _adapter_attached_to_all_lora_layers(model.model, "best_lora"):
+        model.model.set_adapter("best_lora", inference_mode=True)
+        active_name = "best_lora"
+    else:
+        print(
+            "WARNING: best_lora is not attached to all LoRA layers; "
+            "falling back to default adapter with restored best weights."
+        )
+        model.model.set_adapter("default", inference_mode=True)
+        active_name = "default"
+    print(f"Loaded best checkpoint adapters from {adapter_path} (active={active_name})")
+    model.eval()
+
     if os.path.exists(selector_path):
         state = torch.load(selector_path, map_location=device, weights_only=False)
         model.evidence_selector.load_state_dict(state)

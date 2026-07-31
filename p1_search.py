@@ -1,11 +1,17 @@
 #!/usr/bin/env python
-"""在冻结 P0 最优超参基础上，顺序搜索 lambda_selector -> selector_feature_positive_weight -> lambda_prefix_feature。"""
+"""在冻结 P0 最优超参基础上，顺序搜索 lambda_selector -> selector_feature_positive_weight -> lambda_prefix_feature。
+
+支持 ``--start_stage 2/3`` 续跑：保留汇总里已有 Stage1（或 Stage1+2）结果，跳过对应训练，
+在正确的 ``lambda_selector`` 上重跑后续阶段。适用于 test reload 修复后纠正 Stage2/3 汇总，
+而非 Stage1 选参逻辑本身有误（reload 修复后 Stage1 按 test FMR 选参已可信）。
+"""
 
 from __future__ import annotations
 
 import copy
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,6 +36,21 @@ STAGE3_LAMBDA_PREFIX_FEATURE = [0.1, 0.2, 0.3]
 # 阶段 1/2 冻结的 P1 默认值
 DEFAULT_SELECTOR_FEATURE_POSITIVE_WEIGHT = 3.0
 DEFAULT_LAMBDA_PREFIX_FEATURE = 0.1
+
+STAGE1_NAME = "stage1_lambda_selector"
+STAGE2_NAME = "stage2_selector_feature_positive_weight"
+STAGE3_NAME = "stage3_lambda_prefix_feature"
+
+STAGE_SECTION_TITLE = {
+    STAGE1_NAME: "Stage 1: lambda_selector",
+    STAGE2_NAME: "Stage 2: selector_feature_positive_weight",
+    STAGE3_NAME: "Stage 3: lambda_prefix_feature",
+}
+
+# 续跑时可从 Stage1 复制 checkpoint 到 Stage2 的来源阶段
+CHECKPOINT_REUSE_SOURCE_STAGE = {
+    STAGE2_NAME: STAGE1_NAME,
+}
 
 # 汇总表展示的 test 指标列（仅写 run() 实际返回的键）
 METRIC_COLUMNS = [
@@ -109,6 +130,206 @@ def parse_p0_results(path: Path) -> dict[str, float | int]:
         else:
             parsed[key] = float(raw)
     return parsed
+
+
+def parse_frozen_p0_from_p1_results(path: Path) -> tuple[float, float, int]:
+    """从 p1_search_results.md 的「冻结的 P0 最优超参」段落解析三参。"""
+    if not path.is_file():
+        raise FileNotFoundError(f"P1 results file not found: {path}")
+    parsed = parse_p0_results(path)  # 复用同一套反引号字段格式
+    return float(parsed["lambda_feat"]), float(parsed["evidence_bonus"]), int(parsed["top_m_evidence"])
+
+
+def _section_table_lines(text: str, section_title: str) -> list[str]:
+    """提取某个 ``## Stage ...`` 小节里 Markdown 表格的数据行。"""
+    lines = text.splitlines()
+    start_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip() == f"## {section_title}":
+            start_idx = idx
+            break
+    if start_idx is None:
+        return []
+
+    table_rows: list[str] = []
+    in_table = False
+    for line in lines[start_idx + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            break
+        if not stripped:
+            if in_table:
+                break
+            continue
+        if (
+            stripped.startswith("|")
+            and stripped.startswith("| stage | tag |")
+        ):
+            in_table = True
+            continue
+        if stripped.startswith("| ---"):
+            continue
+        if in_table and stripped.startswith("|"):
+            table_rows.append(stripped)
+    return table_rows
+
+
+def parse_stage_trials_from_results(
+    path: Path,
+    stage_name: str,
+    *,
+    frozen_lambda_feat: float,
+    frozen_evidence_bonus: float,
+    frozen_top_m_evidence: int,
+) -> list[TrialResult]:
+    """从 p1_search_results.md 解析某一阶段的试验行。"""
+    section_title = STAGE_SECTION_TITLE.get(stage_name)
+    if section_title is None:
+        raise ValueError(f"Unknown stage name: {stage_name}")
+
+    if not path.is_file():
+        raise FileNotFoundError(f"P1 results file not found: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    rows = _section_table_lines(text, section_title)
+    if not rows:
+        raise ValueError(
+            f"No table rows found for stage {stage_name!r} in results file: {path}"
+        )
+
+    trials: list[TrialResult] = []
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if len(cells) < 6:
+            continue
+        row_stage, tag = cells[0], cells[1]
+        if row_stage != stage_name:
+            continue
+        lambda_selector = float(cells[2])
+        selector_feature_positive_weight = float(cells[3])
+        lambda_prefix_feature = float(cells[4])
+        metric_cells = cells[5 : 5 + len(METRIC_COLUMNS)]
+        best_cell = cells[5 + len(METRIC_COLUMNS)] if len(cells) > 5 + len(METRIC_COLUMNS) else ""
+        metrics: dict[str, float] = {}
+        for name, raw in zip(METRIC_COLUMNS, metric_cells):
+            raw = raw.strip()
+            if raw and raw != "-":
+                try:
+                    metrics[name] = float(raw)
+                except ValueError:
+                    pass
+        trials.append(
+            TrialResult(
+                stage=stage_name,
+                lambda_feat=frozen_lambda_feat,
+                evidence_bonus=frozen_evidence_bonus,
+                top_m_evidence=frozen_top_m_evidence,
+                lambda_selector=lambda_selector,
+                selector_feature_positive_weight=selector_feature_positive_weight,
+                lambda_prefix_feature=lambda_prefix_feature,
+                metrics=metrics,
+                tag=tag,
+                is_best=best_cell.lower() == "yes",
+            )
+        )
+    if not trials:
+        raise ValueError(
+            f"Parsed zero trials for stage {stage_name!r} from results file: {path}"
+        )
+    return trials
+
+
+def _primary_split_index(split_indices: str) -> str:
+    parts = [part.strip() for part in str(split_indices).split(",") if part.strip()]
+    if not parts:
+        raise ValueError("split_indices is empty")
+    return parts[0]
+
+
+def _trial_checkpoint_prefix(ckpt_root: Path, dataset_name: str, split_index: str) -> Path:
+    """与 trainer 一致：``ckpt_root / dataset_name / {split}`` 前缀（无后缀）。"""
+    return Path(ckpt_root) / dataset_name / split_index
+
+
+def checkpoint_is_ready(ckpt_root: Path, dataset_name: str, split_index: str) -> bool:
+    """判断某 trial 根目录下是否已有可 only_eval 的 best checkpoint。"""
+    prefix = _trial_checkpoint_prefix(ckpt_root, dataset_name, split_index)
+    model_dir = Path(f"{prefix}model")
+    selector_path = Path(f"{prefix}selector.bin")
+    return model_dir.is_dir() and selector_path.is_file()
+
+
+def copy_trial_checkpoint(
+    src_ckpt_root: Path,
+    dst_ckpt_root: Path,
+    dataset_name: str,
+    split_index: str,
+) -> None:
+    """把 Stage1 等同 tag 的 checkpoint 复制到 Stage2 目录，供 only_eval 使用。"""
+    src_prefix = _trial_checkpoint_prefix(src_ckpt_root, dataset_name, split_index)
+    dst_prefix = _trial_checkpoint_prefix(dst_ckpt_root, dataset_name, split_index)
+    dst_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    for suffix in ("model", "selector.bin", "review_prefix.bin", "graph_config.json"):
+        src = Path(f"{src_prefix}{suffix}")
+        dst = Path(f"{dst_prefix}{suffix}")
+        if not src.exists():
+            if suffix in ("model", "selector.bin"):
+                raise FileNotFoundError(f"Missing checkpoint artifact: {src}")
+            continue
+        if src.is_dir():
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+    print(f"Reused checkpoint: {src_ckpt_root} -> {dst_ckpt_root}")
+
+
+def maybe_reuse_prior_stage_checkpoint(
+    base_args,
+    *,
+    stage: str,
+    tag: str,
+    split_index: str,
+) -> bool:
+    """若当前 stage 尚无 checkpoint，尝试从上一阶段同 tag 复制。"""
+    source_stage = CHECKPOINT_REUSE_SOURCE_STAGE.get(stage)
+    if source_stage is None:
+        return False
+
+    dst_root = Path(base_args.ckpt_dir) / "p1_search" / stage / tag
+    if checkpoint_is_ready(dst_root, base_args.dataset_name, split_index):
+        return False
+
+    src_root = Path(base_args.ckpt_dir) / "p1_search" / source_stage / tag
+    if not checkpoint_is_ready(src_root, base_args.dataset_name, split_index):
+        return False
+
+    copy_trial_checkpoint(
+        src_root,
+        dst_root,
+        base_args.dataset_name,
+        split_index,
+    )
+    return True
+
+
+def resolve_best_from_loaded_trials(
+    trials: list[TrialResult],
+    *,
+    param_name: str,
+    cli_value: float | None,
+) -> float:
+    """续跑时从已加载 trial 或 CLI 显式值确定上一阶段最优超参。"""
+    if cli_value is not None:
+        return float(cli_value)
+    marked = [trial for trial in trials if trial.is_best]
+    if len(marked) == 1:
+        return float(getattr(marked[0], param_name))
+    if marked:
+        return float(getattr(pick_best_trial(marked), param_name))
+    return float(getattr(pick_best_trial(trials), param_name))
 
 
 @dataclass
@@ -353,6 +574,7 @@ def run_trial(
     selector_feature_positive_weight: float,
     lambda_prefix_feature: float,
     dry_run: bool,
+    split_index: str,
 ) -> TrialResult:
     """执行单次试验并返回 test metrics。"""
     args = build_experiment_args(
@@ -377,6 +599,16 @@ def run_trial(
     print_experiment_summary(args, stage, trial)
     if dry_run:
         return trial
+
+    reused = maybe_reuse_prior_stage_checkpoint(
+        base_args,
+        stage=stage,
+        tag=trial.tag,
+        split_index=split_index,
+    )
+    if reused:
+        args.only_eval = True
+        print(f"[{stage}] {trial.tag}: reused prior-stage checkpoint, running only_eval")
 
     from graph_llm.train import run
 
@@ -484,11 +716,22 @@ def main() -> None:
         action="store_true",
         help="只打印试验配置，不启动训练。",
     )
+    parser.add_argument(
+        "--start_stage",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
+        help="从第几阶段开始搜索：1=全流程；2=跳过 Stage1（从 results 读 Stage1）；3=再跳过 Stage2。",
+    )
     base_args = parser.parse_args()
 
     dry_run = bool(getattr(base_args, "dry_run", False))
     if hasattr(base_args, "dry_run"):
         delattr(base_args, "dry_run")
+
+    start_stage = int(getattr(base_args, "start_stage", 1))
+    if hasattr(base_args, "start_stage"):
+        delattr(base_args, "start_stage")
 
     p0_results_file = (
         Path(base_args.p0_results_file).expanduser()
@@ -522,6 +765,9 @@ def main() -> None:
         f"(from {p0_results_file})"
     )
 
+    split_index = _primary_split_index(base_args.split_indices)
+    print(f"start_stage={start_stage} (resume skips training for earlier stages)")
+
     stage1_trials: list[TrialResult] = []
     stage2_trials: list[TrialResult] = []
     stage3_trials: list[TrialResult] = []
@@ -530,7 +776,57 @@ def main() -> None:
     best_selector_feature_positive_weight = float(base_args.selector_feature_positive_weight)
     best_lambda_prefix_feature = float(base_args.lambda_prefix_feature)
 
+    if start_stage >= 2:
+        stage1_trials = parse_stage_trials_from_results(
+            results_file,
+            STAGE1_NAME,
+            frozen_lambda_feat=frozen_lambda_feat,
+            frozen_evidence_bonus=frozen_evidence_bonus,
+            frozen_top_m_evidence=frozen_top_m_evidence,
+        )
+        cli_lsel = float(base_args.lambda_selector) if _cli_explicit("lambda_selector") else None
+        best_lambda_selector = resolve_best_from_loaded_trials(
+            stage1_trials,
+            param_name="lambda_selector",
+            cli_value=cli_lsel,
+        )
+        for trial in stage1_trials:
+            trial.is_best = trial.lambda_selector == best_lambda_selector
+        print(
+            f"Resume: loaded {len(stage1_trials)} Stage1 trial(s); "
+            f"fixed lambda_selector={best_lambda_selector}"
+        )
+
+    if start_stage >= 3:
+        stage2_trials = parse_stage_trials_from_results(
+            results_file,
+            STAGE2_NAME,
+            frozen_lambda_feat=frozen_lambda_feat,
+            frozen_evidence_bonus=frozen_evidence_bonus,
+            frozen_top_m_evidence=frozen_top_m_evidence,
+        )
+        cli_sfpw = (
+            float(base_args.selector_feature_positive_weight)
+            if _cli_explicit("selector_feature_positive_weight")
+            else None
+        )
+        best_selector_feature_positive_weight = resolve_best_from_loaded_trials(
+            stage2_trials,
+            param_name="selector_feature_positive_weight",
+            cli_value=cli_sfpw,
+        )
+        for trial in stage2_trials:
+            trial.is_best = (
+                trial.selector_feature_positive_weight == best_selector_feature_positive_weight
+            )
+        print(
+            f"Resume: loaded {len(stage2_trials)} Stage2 trial(s); "
+            f"fixed selector_feature_positive_weight={best_selector_feature_positive_weight}"
+        )
+
     def _refresh() -> None:
+        if dry_run:
+            return
         refresh_results_file(
             results_file,
             dataset_name=base_args.dataset_name,
@@ -547,74 +843,82 @@ def main() -> None:
         )
 
     # Stage 1: 搜索 lambda_selector
-    for lambda_selector in STAGE1_LAMBDA_SELECTOR:
-        trial = run_trial(
-            base_args,
-            stage="stage1_lambda_selector",
-            frozen_lambda_feat=frozen_lambda_feat,
-            frozen_evidence_bonus=frozen_evidence_bonus,
-            frozen_top_m_evidence=frozen_top_m_evidence,
-            lambda_selector=lambda_selector,
-            selector_feature_positive_weight=DEFAULT_SELECTOR_FEATURE_POSITIVE_WEIGHT,
-            lambda_prefix_feature=DEFAULT_LAMBDA_PREFIX_FEATURE,
-            dry_run=dry_run,
-        )
-        stage1_trials.append(trial)
-        _refresh()
+    if start_stage <= 1:
+        for lambda_selector in STAGE1_LAMBDA_SELECTOR:
+            trial = run_trial(
+                base_args,
+                stage=STAGE1_NAME,
+                frozen_lambda_feat=frozen_lambda_feat,
+                frozen_evidence_bonus=frozen_evidence_bonus,
+                frozen_top_m_evidence=frozen_top_m_evidence,
+                lambda_selector=lambda_selector,
+                selector_feature_positive_weight=DEFAULT_SELECTOR_FEATURE_POSITIVE_WEIGHT,
+                lambda_prefix_feature=DEFAULT_LAMBDA_PREFIX_FEATURE,
+                dry_run=dry_run,
+                split_index=split_index,
+            )
+            stage1_trials.append(trial)
+            _refresh()
 
-    best_stage1 = mark_stage_best(stage1_trials)
-    best_lambda_selector = best_stage1.lambda_selector
-    print(f"Stage 1 best: lambda_selector={best_lambda_selector} (tag={best_stage1.tag})")
-    _refresh()
+        best_stage1 = mark_stage_best(stage1_trials)
+        best_lambda_selector = best_stage1.lambda_selector
+        print(f"Stage 1 best: lambda_selector={best_lambda_selector} (tag={best_stage1.tag})")
+        _refresh()
 
     # Stage 2: 固定最优 lambda_selector，搜索 selector_feature_positive_weight
-    for selector_feature_positive_weight in STAGE2_SELECTOR_FEATURE_POSITIVE_WEIGHT:
-        trial = run_trial(
-            base_args,
-            stage="stage2_selector_feature_positive_weight",
-            frozen_lambda_feat=frozen_lambda_feat,
-            frozen_evidence_bonus=frozen_evidence_bonus,
-            frozen_top_m_evidence=frozen_top_m_evidence,
-            lambda_selector=best_lambda_selector,
-            selector_feature_positive_weight=selector_feature_positive_weight,
-            lambda_prefix_feature=DEFAULT_LAMBDA_PREFIX_FEATURE,
-            dry_run=dry_run,
-        )
-        stage2_trials.append(trial)
-        _refresh()
+    if start_stage <= 2:
+        stage2_trials = []
+        for selector_feature_positive_weight in STAGE2_SELECTOR_FEATURE_POSITIVE_WEIGHT:
+            trial = run_trial(
+                base_args,
+                stage=STAGE2_NAME,
+                frozen_lambda_feat=frozen_lambda_feat,
+                frozen_evidence_bonus=frozen_evidence_bonus,
+                frozen_top_m_evidence=frozen_top_m_evidence,
+                lambda_selector=best_lambda_selector,
+                selector_feature_positive_weight=selector_feature_positive_weight,
+                lambda_prefix_feature=DEFAULT_LAMBDA_PREFIX_FEATURE,
+                dry_run=dry_run,
+                split_index=split_index,
+            )
+            stage2_trials.append(trial)
+            _refresh()
 
-    best_stage2 = mark_stage_best(stage2_trials)
-    best_selector_feature_positive_weight = best_stage2.selector_feature_positive_weight
-    print(
-        "Stage 2 best: "
-        f"selector_feature_positive_weight={best_selector_feature_positive_weight} "
-        f"(tag={best_stage2.tag})"
-    )
-    _refresh()
+        best_stage2 = mark_stage_best(stage2_trials)
+        best_selector_feature_positive_weight = best_stage2.selector_feature_positive_weight
+        print(
+            "Stage 2 best: "
+            f"selector_feature_positive_weight={best_selector_feature_positive_weight} "
+            f"(tag={best_stage2.tag})"
+        )
+        _refresh()
 
     # Stage 3: 固定前两阶段最优值，搜索 lambda_prefix_feature
-    for lambda_prefix_feature in STAGE3_LAMBDA_PREFIX_FEATURE:
-        trial = run_trial(
-            base_args,
-            stage="stage3_lambda_prefix_feature",
-            frozen_lambda_feat=frozen_lambda_feat,
-            frozen_evidence_bonus=frozen_evidence_bonus,
-            frozen_top_m_evidence=frozen_top_m_evidence,
-            lambda_selector=best_lambda_selector,
-            selector_feature_positive_weight=best_selector_feature_positive_weight,
-            lambda_prefix_feature=lambda_prefix_feature,
-            dry_run=dry_run,
-        )
-        stage3_trials.append(trial)
-        _refresh()
+    if start_stage <= 3:
+        stage3_trials = []
+        for lambda_prefix_feature in STAGE3_LAMBDA_PREFIX_FEATURE:
+            trial = run_trial(
+                base_args,
+                stage=STAGE3_NAME,
+                frozen_lambda_feat=frozen_lambda_feat,
+                frozen_evidence_bonus=frozen_evidence_bonus,
+                frozen_top_m_evidence=frozen_top_m_evidence,
+                lambda_selector=best_lambda_selector,
+                selector_feature_positive_weight=best_selector_feature_positive_weight,
+                lambda_prefix_feature=lambda_prefix_feature,
+                dry_run=dry_run,
+                split_index=split_index,
+            )
+            stage3_trials.append(trial)
+            _refresh()
 
-    best_stage3 = mark_stage_best(stage3_trials)
-    best_lambda_prefix_feature = best_stage3.lambda_prefix_feature
-    print(
-        f"Stage 3 best: lambda_prefix_feature={best_lambda_prefix_feature} "
-        f"(tag={best_stage3.tag})"
-    )
-    _refresh()
+        best_stage3 = mark_stage_best(stage3_trials)
+        best_lambda_prefix_feature = best_stage3.lambda_prefix_feature
+        print(
+            f"Stage 3 best: lambda_prefix_feature={best_lambda_prefix_feature} "
+            f"(tag={best_stage3.tag})"
+        )
+        _refresh()
 
     print(f"P1 search complete. Results written to: {results_file}")
 
