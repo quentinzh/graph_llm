@@ -24,12 +24,12 @@ if __name__ == "__main__":
     parser = build_arg_parser()
     # 默认保留离散 top-M evidence bonus；不使用连续或 tail-scaled bonus。
     parser.set_defaults(
-        lambda_feat=1e-2,
-        evidence_bonus=0.1,
+        lambda_feat=0.1,
+        evidence_bonus=1.0,
         top_m_evidence=5,
         # 冻结 0.6B 评论向量 + 两个独立的 target-aware soft-prefix projector。
         review_top_k_user=16,
-        review_top_k_item=16,
+        review_top_k_item=32,
         user_review_prefix_len=4,
         item_review_prefix_len=4,
         lambda_prefix_feature=0.1,

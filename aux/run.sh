@@ -78,7 +78,7 @@ CMD=(
   --accumulation_steps 4
   --epochs 3
   --lambda_selector 0.1
-  --top_m_evidence 10
+  --top_m_evidence 5
   --tail_weight_min 0.5
   --tail_weight_max 2.0
   --model_path "$GRAPH_ROOT/pretrain_llm/qwen3-4b"
