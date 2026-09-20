@@ -1,0 +1,619 @@
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:40 max_graph_nodes:512
+lambda_selector:0.2 lambda_feat:0.05 selector_feature_positive_weight:2.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:4 review_top_k_item:8 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.0
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:1.5 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:1 primary_device:cuda:1 embedding_device:cuda:1
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=1 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+checkpoint_selection:grounded_sequence selection_fmr_threshold:0.17 skip_test_evaluation:False
+llm_layer_placement:cuda:1:1
+CUDA OOM during training. epoch=0 batch_idx=0 batch_size=8. CUDA memory cuda:1 GiB current allocated/reserved=20.26/20.69, peak allocated/reserved=20.37/20.69
+OOM on plan manual: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 1 has a total capacity of 44.39 GiB of which 5.81 MiB is free. Process 3337836 has 11.10 GiB memory in use. Process 3492859 has 1.95 GiB memory in use. Including non-PyTorch memory, this process has 21.04 GiB memory in use. Process 3521404 has 10.26 GiB memory in use. Of the allocated memory 20.37 GiB is allocated by PyTorch, and 331.28 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:4 eval_batch_size:4 accumulation_steps:4 word:40 gradient_checkpointing:True
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:40 max_graph_nodes:512
+lambda_selector:0.2 lambda_feat:0.05 selector_feature_positive_weight:2.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:4 review_top_k_item:8 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.0
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:1.5 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:1 primary_device:cuda:1 embedding_device:cuda:1
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=1 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=True llm_device_map=single
+llm_device_map:single gradient_checkpointing:True attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+checkpoint_selection:grounded_sequence selection_fmr_threshold:0.17 skip_test_evaluation:False
+llm_layer_placement:cuda:1:1
+CUDA OOM during training. epoch=0 batch_idx=1 batch_size=4. CUDA memory cuda:1 GiB current allocated/reserved=9.92/9.97, peak allocated/reserved=9.94/9.99
+OOM on plan manual: CUDA out of memory. Tried to allocate 46.00 MiB. GPU 1 has a total capacity of 44.39 GiB of which 37.81 MiB is free. Process 3725144 has 12.63 GiB memory in use. Process 3790258 has 10.25 GiB memory in use. Process 3805901 has 11.10 GiB memory in use. Including non-PyTorch memory, this process has 10.33 GiB memory in use. Of the allocated memory 9.94 GiB is allocated by PyTorch, and 27.83 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:4 eval_batch_size:4 accumulation_steps:4 word:40 gradient_checkpointing:True
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:40 max_graph_nodes:512
+lambda_selector:0.2 lambda_feat:0.05 selector_feature_positive_weight:2.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:4 review_top_k_item:8 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.0
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:1.5 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=True llm_device_map=single
+llm_device_map:single gradient_checkpointing:True attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+checkpoint_selection:grounded_sequence selection_fmr_threshold:0.17 skip_test_evaluation:False
+llm_layer_placement:cuda:0:1
+valid Loss: 5.859252452850342
+
+eval_group: all | samples: 8 | max_eval_batches: 2 | evaluated_samples: 8 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  8.8968
+BLEU-4  0.0000
+USR  1.0000 | USN       8
+Distinct-1  0.7804
+Distinct-2  0.9471
+ENTR  7.3188
+DIV  0.0714
+FCR  0.3750
+FMR  0.2500
+rouge_1 13.8699
+rouge_2  0.5435
+rouge_l  5.7701
+eval_group: low | samples: 4 | max_eval_batches: 2 | evaluated_samples: 8 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  4.7297
+BLEU-4  0.0000
+USR  1.0000 | USN       4
+Distinct-1  0.7383
+Distinct-2  0.9455
+ENTR  6.6301
+DIV  0.1667
+FCR  0.2500
+FMR  0.2500
+rouge_1 11.2500
+rouge_2  0.0000
+rouge_l  3.7355
+eval_group: high | samples: 0 | max_eval_batches: 2 | evaluated_samples: 8 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+no samples
+valid FMR: 0.250000
+valid selection: mode=grounded_sequence key=(1.0, 5.770053711551619, 7.333425432288266, 0.25) BLEU-1=8.8968 rouge_l=5.7701
+save model (validation selection key: (1.0, 5.770053711551619, 7.333425432288266, 0.25))
+eval_group: all | samples: 8 | max_eval_batches: 2 | evaluated_samples: 8 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  9.1286
+BLEU-4  0.0000
+USR  1.0000 | USN       8
+Distinct-1  0.7891
+Distinct-2  0.9020
+ENTR  7.1440
+DIV  0.1429
+FCR  0.5000
+FMR  0.2500
+rouge_1 16.9831
+rouge_2  0.9615
+rouge_l  8.0609
+eval_group: low | samples: 3 | max_eval_batches: 2 | evaluated_samples: 8 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  9.3023
+BLEU-4  0.0000
+USR  1.0000 | USN       3
+Distinct-1  0.8355
+Distinct-2  0.9186
+ENTR  6.0452
+DIV  0.0000
+FCR  0.6667
+FMR  0.3333
+rouge_1 23.3333
+rouge_2  2.5641
+rouge_l  9.9822
+eval_group: high | samples: 4 | max_eval_batches: 2 | evaluated_samples: 8 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  8.9431
+BLEU-4  0.0000
+USR  1.0000 | USN       4
+Distinct-1  0.7327
+Distinct-2  0.8728
+ENTR  6.3662
+DIV  0.0000
+FCR  0.2500
+FMR  0.2500
+rouge_1 10.6970
+rouge_2  0.0000
+rouge_l  6.0762
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:4 eval_batch_size:4 accumulation_steps:4 word:40 gradient_checkpointing:True
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:40 max_graph_nodes:512
+lambda_selector:0.2 lambda_feat:0.05 selector_feature_positive_weight:2.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:4 review_top_k_item:8 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.0
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:1.5 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=True llm_device_map=single
+llm_device_map:single gradient_checkpointing:True attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+checkpoint_selection:grounded_sequence selection_fmr_threshold:0.17 skip_test_evaluation:False
+llm_layer_placement:cuda:0:1
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:40 max_graph_nodes:512
+lambda_selector:0.2 lambda_feat:0.05 selector_feature_positive_weight:2.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:4 review_top_k_item:8 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.0
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:1.5 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+checkpoint_selection:grounded_sequence selection_fmr_threshold:0.17 skip_test_evaluation:False
+llm_layer_placement:cuda:0:1
+valid Loss: 6.392770528793335
+
+eval_group: all | samples: 16 | max_eval_batches: 2 | evaluated_samples: 16 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  6.2057
+BLEU-4  0.0000
+USR  1.0000 | USN      16
+Distinct-1  0.6872
+Distinct-2  0.8847
+ENTR  7.6311
+DIV  0.3833
+FCR  0.3333
+FMR  0.1875
+rouge_1 12.4794
+rouge_2  0.2717
+rouge_l  4.5546
+eval_group: low | samples: 9 | max_eval_batches: 2 | evaluated_samples: 16 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  2.6706
+BLEU-4  0.0000
+USR  1.0000 | USN       9
+Distinct-1  0.5874
+Distinct-2  0.8350
+ENTR  6.9764
+DIV  0.0833
+FCR  0.3750
+FMR  0.2222
+rouge_1 10.2734
+rouge_2  0.0000
+rouge_l  2.1860
+eval_group: high | samples: 1 | max_eval_batches: 2 | evaluated_samples: 16 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  8.5714
+BLEU-4  0.0000
+USR  1.0000 | USN       1
+Distinct-1  0.7714
+Distinct-2  0.9714
+ENTR  4.8822
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1 18.7500
+rouge_2  0.0000
+rouge_l  9.4590
+valid FMR: 0.187500
+valid selection: mode=grounded_sequence key=(1.0, 4.554597454535364, 5.380135606700306, 0.1875) BLEU-1=6.2057 rouge_l=4.5546
+save model (validation selection key: (1.0, 4.554597454535364, 5.380135606700306, 0.1875))
+eval_group: all | samples: 16 | max_eval_batches: 2 | evaluated_samples: 16 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  6.0329
+BLEU-4  0.0000
+USR  1.0000 | USN      16
+Distinct-1  0.7810
+Distinct-2  0.9412
+ENTR  7.9119
+DIV  0.2833
+FCR  0.4286
+FMR  0.1250
+rouge_1 14.1154
+rouge_2  0.4808
+rouge_l  5.3122
+eval_group: low | samples: 4 | max_eval_batches: 2 | evaluated_samples: 16 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  3.5211
+BLEU-4  0.0000
+USR  1.0000 | USN       4
+Distinct-1  0.7254
+Distinct-2  0.9355
+ENTR  6.5033
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1 12.2917
+rouge_2  1.9231
+rouge_l  3.9466
+eval_group: high | samples: 8 | max_eval_batches: 2 | evaluated_samples: 16 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  6.7669
+BLEU-4  0.0000
+USR  1.0000 | USN       8
+Distinct-1  0.7892
+Distinct-2  0.9529
+ENTR  7.2819
+DIV  0.1429
+FCR  0.3750
+FMR  0.2500
+rouge_1 14.9296
+rouge_2  0.0000
+rouge_l  5.5463
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:40 max_graph_nodes:512
+lambda_selector:0.2 lambda_feat:0.05 selector_feature_positive_weight:2.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:4 review_top_k_item:8 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.0
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:1.5 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+checkpoint_selection:grounded_sequence selection_fmr_threshold:0.17 skip_test_evaluation:False
+llm_layer_placement:cuda:0:1
+Train Epoch: 0 Loss: 4.322795	TailSFT: 4.001881	Selector: 0.693527	Feat: 3.644179	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/27.92, peak allocated/reserved=27.42/27.92
+Train Epoch: 0 Loss: 3.858411	TailSFT: 3.555625	Selector: 0.691968	Feat: 3.287850	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/27.99, peak allocated/reserved=27.43/27.99
+Train Epoch: 0 Loss: 3.854356	TailSFT: 3.551634	Selector: 0.691876	Feat: 3.286940	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/27.99, peak allocated/reserved=27.43/27.99
+Train Epoch: 0 Loss: 3.807707	TailSFT: 3.509878	Selector: 0.692065	Feat: 3.188329	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.16, peak allocated/reserved=27.56/28.16
+Train Epoch: 0 Loss: 3.794633	TailSFT: 3.500522	Selector: 0.691842	Feat: 3.114848	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.16, peak allocated/reserved=27.56/28.16
+Train Epoch: 0 Loss: 3.760050	TailSFT: 3.466348	Selector: 0.691981	Feat: 3.106111	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.16, peak allocated/reserved=27.56/28.16
+Train Epoch: 0 Loss: 3.772093	TailSFT: 3.479394	Selector: 0.691699	Feat: 3.087185	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.16, peak allocated/reserved=27.80/28.16
+Train Epoch: 0 Loss: 3.756767	TailSFT: 3.465949	Selector: 0.691623	Feat: 3.049872	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.16, peak allocated/reserved=27.80/28.16
+Train Epoch: 0 Loss: 3.765047	TailSFT: 3.473798	Selector: 0.692040	Feat: 3.056822	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.18, peak allocated/reserved=27.80/28.18
+Train Epoch: 0 Loss: 3.748135	TailSFT: 3.456557	Selector: 0.691687	Feat: 3.064815	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.18, peak allocated/reserved=27.80/28.18
+Train Epoch: 0 Loss: 3.738574	TailSFT: 3.450536	Selector: 0.691890	Feat: 2.993213	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.712017	TailSFT: 3.422216	Selector: 0.691536	Feat: 3.029880	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.732464	TailSFT: 3.443351	Selector: 0.691884	Feat: 3.014735	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.756787	TailSFT: 3.465340	Selector: 0.691993	Feat: 3.060955	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.733747	TailSFT: 3.443070	Selector: 0.691740	Feat: 3.046578	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.704197	TailSFT: 3.416997	Selector: 0.691923	Feat: 2.976311	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.720204	TailSFT: 3.433737	Selector: 0.691412	Feat: 2.963697	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.678308	TailSFT: 3.390895	Selector: 0.691100	Feat: 2.983862	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.701571	TailSFT: 3.414916	Selector: 0.690851	Feat: 2.969679	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.706077	TailSFT: 3.416904	Selector: 0.691641	Feat: 3.016881	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.681647	TailSFT: 3.396476	Selector: 0.691831	Feat: 2.936091	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.707921	TailSFT: 3.421455	Selector: 0.691384	Feat: 2.963781	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.709224	TailSFT: 3.420684	Selector: 0.690603	Feat: 3.008394	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.693847	TailSFT: 3.409848	Selector: 0.690625	Feat: 2.917485	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.704865	TailSFT: 3.420072	Selector: 0.690937	Feat: 2.932125	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.676441	TailSFT: 3.390941	Selector: 0.691047	Feat: 2.945797	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.701715	TailSFT: 3.417122	Selector: 0.691367	Feat: 2.926387	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.672961	TailSFT: 3.385722	Selector: 0.691475	Feat: 2.978878	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.684899	TailSFT: 3.399916	Selector: 0.691331	Feat: 2.934346	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.670202	TailSFT: 3.383670	Selector: 0.691601	Feat: 2.964246	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.654131	TailSFT: 3.371640	Selector: 0.691252	Feat: 2.884799	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.635977	TailSFT: 3.351197	Selector: 0.691226	Feat: 2.930695	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.661921	TailSFT: 3.377721	Selector: 0.691115	Feat: 2.919543	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.669890	TailSFT: 3.384798	Selector: 0.691106	Feat: 2.937414	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.656102	TailSFT: 3.372551	Selector: 0.691764	Feat: 2.903953	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.669963	TailSFT: 3.387535	Selector: 0.691317	Feat: 2.883297	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.663676	TailSFT: 3.378507	Selector: 0.691210	Feat: 2.938542	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.636520	TailSFT: 3.355226	Selector: 0.691165	Feat: 2.861228	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.637955	TailSFT: 3.354521	Selector: 0.690246	Feat: 2.907703	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.639618	TailSFT: 3.356206	Selector: 0.691894	Feat: 2.900671	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.654070	TailSFT: 3.368827	Selector: 0.691514	Feat: 2.938808	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.679349	TailSFT: 3.394789	Selector: 0.691390	Feat: 2.925654	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.615624	TailSFT: 3.335405	Selector: 0.691298	Feat: 2.839201	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.668615	TailSFT: 3.384275	Selector: 0.691425	Feat: 2.921118	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.631752	TailSFT: 3.351825	Selector: 0.691399	Feat: 2.832949	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.646206	TailSFT: 3.363546	Selector: 0.691696	Feat: 2.886433	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.615818	TailSFT: 3.332201	Selector: 0.691118	Feat: 2.907871	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.633966	TailSFT: 3.353586	Selector: 0.690465	Feat: 2.845755	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.623615	TailSFT: 3.340467	Selector: 0.691163	Feat: 2.898313	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.665862	TailSFT: 3.382061	Selector: 0.691146	Feat: 2.911425	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.661785	TailSFT: 3.380480	Selector: 0.691696	Feat: 2.859308	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.626965	TailSFT: 3.342777	Selector: 0.691731	Feat: 2.916835	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.639020	TailSFT: 3.357628	Selector: 0.691215	Feat: 2.862981	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.615861	TailSFT: 3.335428	Selector: 0.690934	Feat: 2.844931	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.636235	TailSFT: 3.353753	Selector: 0.690990	Feat: 2.885680	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.635275	TailSFT: 3.355576	Selector: 0.691064	Feat: 2.829706	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+Train Epoch: 0 Loss: 3.632735	TailSFT: 3.349860	Selector: 0.691558	Feat: 2.891268	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=28.02/28.59
+valid Loss: 3.637977613096277
+
+eval_group: all | samples: 28760 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  8.9694
+BLEU-4  0.8361
+USR  0.2412 | USN    6937
+Distinct-1  0.9559
+Distinct-2  0.8315
+ENTR  8.3506
+DIV  0.1787
+FCR  0.3809
+FMR  0.1507
+rouge_1 13.3832
+rouge_2  2.0736
+rouge_l 11.3403
+eval_group: low | samples: 5752 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1 12.8779
+BLEU-4  1.2476
+USR  0.3289 | USN    1892
+Distinct-1  0.9582
+Distinct-2  0.8294
+ENTR  8.0659
+DIV  0.1970
+FCR  0.4843
+FMR  0.1944
+rouge_1 16.0621
+rouge_2  2.8810
+rouge_l 13.0814
+eval_group: high | samples: 5752 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  7.4397
+BLEU-4  0.4853
+USR  0.3571 | USN    2054
+Distinct-1  0.9514
+Distinct-2  0.8349
+ENTR  8.2656
+DIV  0.1589
+FCR  0.2516
+FMR  0.1027
+rouge_1 11.0697
+rouge_2  1.1810
+rouge_l  9.7267
+valid FMR: 0.150730
+valid selection: mode=grounded_sequence key=(0.0, 0.15073018080667594, 10.1548466681735, 8.969361983210213) BLEU-1=8.9694 rouge_l=11.3403
+save model (validation selection key: (0.0, 0.15073018080667594, 10.1548466681735, 8.969361983210213))
+Train Epoch: 1 Loss: 3.560308	TailSFT: 3.281891	Selector: 0.691250	Feat: 2.803349	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.48/28.59
+Train Epoch: 1 Loss: 3.536833	TailSFT: 3.261991	Selector: 0.691515	Feat: 2.730768	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.50/28.59
+Train Epoch: 1 Loss: 3.526938	TailSFT: 3.252733	Selector: 0.691086	Feat: 2.719766	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.50/28.59
+Train Epoch: 1 Loss: 3.547412	TailSFT: 3.273387	Selector: 0.691181	Feat: 2.715767	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.50/28.59
+Train Epoch: 1 Loss: 3.561166	TailSFT: 3.282929	Selector: 0.691197	Feat: 2.799951	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.50/28.59
+Train Epoch: 1 Loss: 3.531783	TailSFT: 3.256677	Selector: 0.691435	Feat: 2.736392	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.50/28.59
+Train Epoch: 1 Loss: 3.541068	TailSFT: 3.263303	Selector: 0.691837	Feat: 2.787937	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.565488	TailSFT: 3.287661	Selector: 0.691474	Feat: 2.790644	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.547974	TailSFT: 3.271542	Selector: 0.691668	Feat: 2.761978	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.554462	TailSFT: 3.277815	Selector: 0.691853	Feat: 2.765530	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.571089	TailSFT: 3.291238	Selector: 0.691675	Feat: 2.830307	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.529922	TailSFT: 3.255073	Selector: 0.691530	Feat: 2.730868	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.548851	TailSFT: 3.270354	Selector: 0.691536	Feat: 2.803782	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.546187	TailSFT: 3.271705	Selector: 0.691543	Feat: 2.723449	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.53/28.59
+Train Epoch: 1 Loss: 3.532885	TailSFT: 3.257354	Selector: 0.691398	Feat: 2.745029	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.71/28.59
+Train Epoch: 1 Loss: 3.559583	TailSFT: 3.284879	Selector: 0.691198	Feat: 2.729289	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.71/28.59
+Train Epoch: 1 Loss: 3.547946	TailSFT: 3.274627	Selector: 0.691689	Feat: 2.699621	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.71/28.59
+Train Epoch: 1 Loss: 3.528782	TailSFT: 3.256861	Selector: 0.691619	Feat: 2.671953	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.71/28.59
+Train Epoch: 1 Loss: 3.510025	TailSFT: 3.235576	Selector: 0.691436	Feat: 2.723230	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.89/28.59
+Train Epoch: 1 Loss: 3.535509	TailSFT: 3.261332	Selector: 0.691759	Feat: 2.716511	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.89/28.59
+Train Epoch: 1 Loss: 3.575032	TailSFT: 3.298245	Selector: 0.691471	Feat: 2.769842	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.59, peak allocated/reserved=27.89/28.59
+Train Epoch: 1 Loss: 3.544306	TailSFT: 3.270233	Selector: 0.691676	Feat: 2.714762	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.89/28.60
+Train Epoch: 1 Loss: 3.532901	TailSFT: 3.256386	Selector: 0.691475	Feat: 2.764394	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.89/28.60
+Train Epoch: 1 Loss: 3.543002	TailSFT: 3.266758	Selector: 0.691627	Feat: 2.758385	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.89/28.60
+Train Epoch: 1 Loss: 3.519258	TailSFT: 3.247392	Selector: 0.691638	Feat: 2.670767	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.89/28.60
+Train Epoch: 1 Loss: 3.540715	TailSFT: 3.264711	Selector: 0.691613	Feat: 2.753618	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.89/28.60
+Train Epoch: 1 Loss: 3.547648	TailSFT: 3.269924	Selector: 0.691721	Feat: 2.787594	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.89/28.60
+Train Epoch: 1 Loss: 3.494435	TailSFT: 3.221712	Selector: 0.691621	Feat: 2.687987	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.89/28.60
+Train Epoch: 1 Loss: 3.547067	TailSFT: 3.272488	Selector: 0.691728	Feat: 2.724655	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 3.554918	TailSFT: 3.282332	Selector: 0.691421	Feat: 2.686035	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 3.544106	TailSFT: 3.267653	Selector: 0.691278	Feat: 2.763946	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 3.520380	TailSFT: 3.244392	Selector: 0.692019	Feat: 2.751674	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 3.525228	TailSFT: 3.248729	Selector: 0.691490	Feat: 2.764029	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 3.519353	TailSFT: 3.244323	Selector: 0.691584	Feat: 2.734254	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 3.526398	TailSFT: 3.254997	Selector: 0.691562	Feat: 2.661771	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 3.518340	TailSFT: 3.240901	Selector: 0.691627	Feat: 2.782267	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 4.380064	TailSFT: 4.062750	Selector: 0.691540	Feat: 3.580111	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 5.093210	TailSFT: 4.750675	Selector: 0.691650	Feat: 4.084087	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 5.066881	TailSFT: 4.727979	Selector: 0.691514	Feat: 4.011982	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 5.077964	TailSFT: 4.737009	Selector: 0.691692	Feat: 4.052337	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: 5.089194	TailSFT: 4.749598	Selector: 0.691633	Feat: 4.025385	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 1 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+valid Loss: nan
+
+eval_group: all | samples: 28760 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  0.0156
+BLEU-4  0.0000
+USR  0.0000 | USN       1
+Distinct-1  0.1000
+Distinct-2  0.1000
+ENTR  0.9993
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1  0.0582
+rouge_2  0.0000
+rouge_l  0.0162
+eval_group: low | samples: 5752 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  0.0209
+BLEU-4  0.0000
+USR  0.0002 | USN       1
+Distinct-1  0.1000
+Distinct-2  0.1000
+ENTR  0.9993
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1  0.0901
+rouge_2  0.0000
+rouge_l  0.0219
+eval_group: high | samples: 5752 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  0.0217
+BLEU-4  0.0000
+USR  0.0002 | USN       1
+Distinct-1  0.1000
+Distinct-2  0.1000
+ENTR  0.9993
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1  0.1008
+rouge_2  0.0000
+rouge_l  0.0228
+valid FMR: 0.000000
+valid selection: mode=grounded_sequence key=(0.0, 0.0, 0.015934609666373, 0.015646731571627256) BLEU-1=0.0156 rouge_l=0.0162
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.25/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.50/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.58/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.58/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.58/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=27.66/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+Train Epoch: 2 Loss: nan	TailSFT: nan	Selector: nan	Feat: nan	PrefixFeat: 0.000000	CUDA memory cuda:0 GiB current allocated/reserved=8.94/28.60, peak allocated/reserved=28.02/28.60
+valid Loss: nan
+
+eval_group: all | samples: 28760 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  0.0156
+BLEU-4  0.0000
+USR  0.0000 | USN       1
+Distinct-1  0.1000
+Distinct-2  0.1000
+ENTR  0.9993
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1  0.0582
+rouge_2  0.0000
+rouge_l  0.0162
+eval_group: low | samples: 5752 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  0.0209
+BLEU-4  0.0000
+USR  0.0002 | USN       1
+Distinct-1  0.1000
+Distinct-2  0.1000
+ENTR  0.9993
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1  0.0901
+rouge_2  0.0000
+rouge_l  0.0219
+eval_group: high | samples: 5752 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17256 | low_tail_demand: n=5752 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5752 | mean=0.328522 | min=0.214286 | max=1.000000
+BLEU-1  0.0217
+BLEU-4  0.0000
+USR  0.0002 | USN       1
+Distinct-1  0.1000
+Distinct-2  0.1000
+ENTR  0.9993
+DIV  0.0000
+FCR  0.0000
+FMR  0.0000
+rouge_1  0.1008
+rouge_2  0.0000
+rouge_l  0.0228
+valid FMR: 0.000000
+valid selection: mode=grounded_sequence key=(0.0, 0.0, 0.015934609666373, 0.015646731571627256) BLEU-1=0.0156 rouge_l=0.0162
+eval_group: all | samples: 28649 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  8.8559
+BLEU-4  0.7603
+USR  0.2392 | USN    6852
+Distinct-1  0.9560
+Distinct-2  0.8310
+ENTR  8.3140
+DIV  0.1795
+FCR  0.3664
+FMR  0.1503
+rouge_1 13.1096
+rouge_2  1.9121
+rouge_l 11.1656
+eval_group: low | samples: 5729 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1 12.7301
+BLEU-4  1.3373
+USR  0.3280 | USN    1879
+Distinct-1  0.9581
+Distinct-2  0.8292
+ENTR  8.0411
+DIV  0.2078
+FCR  0.4788
+FMR  0.1960
+rouge_1 15.6417
+rouge_2  2.7500
+rouge_l 12.9087
+eval_group: high | samples: 5729 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  7.0288
+BLEU-4  0.4376
+USR  0.3585 | USN    2054
+Distinct-1  0.9542
+Distinct-2  0.8327
+ENTR  8.2090
+DIV  0.1590
+FCR  0.2480
+FMR  0.1011
+rouge_1 11.0121
+rouge_2  1.1645
+rouge_l  9.6318
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:20 max_graph_nodes:512
+lambda_selector:0.1 lambda_feat:0.1 selector_feature_positive_weight:3.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:16 review_top_k_item:32 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.1
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:2.0 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:1 primary_device:cuda:1 embedding_device:cuda:1
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=1 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:1:1
+CUDA OOM during training. epoch=0 batch_idx=0 batch_size=8. CUDA memory cuda:1 GiB current allocated/reserved=25.72/26.13, peak allocated/reserved=25.73/26.15
+OOM on plan manual: CUDA out of memory. Tried to allocate 94.00 MiB. GPU 1 has a total capacity of 44.39 GiB of which 57.12 MiB is free. Process 1032660 has 11.43 GiB memory in use. Including non-PyTorch memory, this process has 26.47 GiB memory in use. Process 1300545 has 6.40 GiB memory in use. Of the allocated memory 25.72 GiB is allocated by PyTorch, and 419.84 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

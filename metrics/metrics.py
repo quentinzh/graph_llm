@@ -141,16 +141,20 @@ def rouge_l_sentence_level(evaluated_sentences, reference_sentences):
 def rouge(hypotheses, references):
     rouge_1 = [rouge_n([hyp], [ref], 1) for hyp, ref in zip(hypotheses, references)]
     rouge_2 = [rouge_n([hyp], [ref], 2) for hyp, ref in zip(hypotheses, references)]
+    # R-4 与 R-1/R-2 同口径：4-gram recall（非 BLEU-4，非 ROUGE-SU4）
+    rouge_4 = [rouge_n([hyp], [ref], 4) for hyp, ref in zip(hypotheses, references)]
     rouge_l = [
         rouge_l_sentence_level([hyp], [ref])
         for hyp, ref in zip(hypotheses, references)
     ]
     rouge_1_f, rouge_1_p, rouge_1_r = map(np.mean, zip(*rouge_1))
     rouge_2_f, rouge_2_p, rouge_2_r = map(np.mean, zip(*rouge_2))
+    rouge_4_f, rouge_4_p, rouge_4_r = map(np.mean, zip(*rouge_4))
     rouge_l_f, rouge_l_p, rouge_l_r = map(np.mean, zip(*rouge_l))
     return {
         "rouge_1": rouge_1_r,
         "rouge_2": rouge_2_r,
+        "rouge_4": rouge_4_r,
         "rouge_l": rouge_l_f,
     }
 

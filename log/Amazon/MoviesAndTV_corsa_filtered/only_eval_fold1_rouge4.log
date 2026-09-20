@@ -1,0 +1,45 @@
+recompute_from_generate: /home/panqingwei/codesofpqw/LLMUserBias/graph_llm/log/output/Amazon/MoviesAndTV_corsa_filtered/1generate.all.dataset
+split_index:1
+samples:28649
+eval_group: all | samples: 28649 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  8.8293
+BLEU-4  0.7586
+USR  0.2414 | USN    6917
+Distinct-1  0.9558
+Distinct-2  0.8298
+ENTR  8.3237
+DIV  0.1789
+FCR  0.3664
+FMR  0.1502
+rouge_1 13.0815
+rouge_2  1.9104
+rouge_4  0.1584
+rouge_l 11.1422
+eval_group: low | samples: 5729 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1 12.6950
+BLEU-4  1.3338
+USR  0.3292 | USN    1886
+Distinct-1  0.9578
+Distinct-2  0.8278
+ENTR  8.0438
+DIV  0.2072
+FCR  0.4838
+FMR  0.1957
+rouge_1 15.6133
+rouge_2  2.7465
+rouge_4  0.2667
+rouge_l 12.8875
+eval_group: high | samples: 5729 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  7.0136
+BLEU-4  0.4361
+USR  0.3603 | USN    2064
+Distinct-1  0.9537
+Distinct-2  0.8315
+ENTR  8.2171
+DIV  0.1586
+FCR  0.2489
+FMR  0.1011
+rouge_1 10.9954
+rouge_2  1.1610
+rouge_4  0.0557
+rouge_l  9.6197

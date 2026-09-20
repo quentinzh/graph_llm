@@ -44,6 +44,7 @@ METRIC_COLUMNS = [
     "FMR",
     "rouge_1",
     "rouge_2",
+    "rouge_4",
     "rouge_l",
 ]
 

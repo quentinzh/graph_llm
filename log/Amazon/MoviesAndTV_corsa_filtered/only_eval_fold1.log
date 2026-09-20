@@ -1,0 +1,55 @@
+/home/panqingwei/codesofpqw/LLMUserBias/graph_llm/pretrain_llm/qwen3-4b
+split_index:1
+batch_size:8 eval_batch_size:8 accumulation_steps:4 word:40 gradient_checkpointing:False
+lora_r:16 lora_alpha:32 lora_dropout:0.05 lora_target_modules:q_proj,k_proj,v_proj,o_proj
+max_profile_tokens:128 max_target_item_tokens:64 max_generation_prompt_tokens:40 max_graph_nodes:512
+lambda_selector:0.2 lambda_feat:0.05 selector_feature_positive_weight:2.0 top_m_evidence:5 evidence_bonus:1.0 magnet_q:0.15
+review_top_k_user:4 review_top_k_item:8 user_review_prefix_len:4 item_review_prefix_len:4 review_attention_heads:8 review_prefix_dropout:0.1 lambda_prefix_feature:0.0
+tail_alpha:0.5 tail_weight_min:0.5 tail_weight_max:1.5 tail_reference_df:3780.0000 tail_threshold:230
+losses: tail-weighted SFT + lambda_selector * sampled selector BCE + lambda_feat * feature loss + lambda_prefix_feature * prefix-feature alignment; graph UL disabled
+node_quotas:tail=256 relevance=128 preference=128
+devices:0 primary_device:cuda:0 embedding_device:cuda:0
+embedding_backend:qwen_embedding
+active_oom_plan:manual
+active_oom_plan_desc:manual devices=0 batch_size=baseline eval_batch_size=baseline gradient_checkpointing=False llm_device_map=single
+llm_device_map:single gradient_checkpointing:False attn_implementation:sdpa primary_foreign_reserve_gib:12.0 primary_gpu_balance_ratio:0.92 embedding_device_reserve_gib:10.0
+llm_layer_placement:cuda:0:1
+eval_group: all | samples: 28649 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  8.8293
+BLEU-4  0.7586
+USR  0.2414 | USN    6917
+Distinct-1  0.9558
+Distinct-2  0.8298
+ENTR  8.3237
+DIV  0.1789
+FCR  0.3664
+FMR  0.1502
+rouge_1 13.0815
+rouge_2  1.9104
+rouge_l 11.1422
+eval_group: low | samples: 5729 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1 12.6950
+BLEU-4  1.3338
+USR  0.3292 | USN    1886
+Distinct-1  0.9578
+Distinct-2  0.8278
+ENTR  8.0438
+DIV  0.2072
+FCR  0.4838
+FMR  0.1957
+rouge_1 15.6133
+rouge_2  2.7465
+rouge_l 12.8875
+eval_group: high | samples: 5729 | tail_low_percent: 0.2 | tail_high_percent: 0.2 | excluded_samples: 17191 | low_tail_demand: n=5729 | mean=0.000000 | min=0.000000 | max=0.000000 | high_tail_demand: n=5729 | mean=0.326524 | min=0.200000 | max=1.000000
+BLEU-1  7.0136
+BLEU-4  0.4361
+USR  0.3603 | USN    2064
+Distinct-1  0.9537
+Distinct-2  0.8315
+ENTR  8.2171
+DIV  0.1586
+FCR  0.2489
+FMR  0.1011
+rouge_1 10.9954
+rouge_2  1.1610
+rouge_l  9.6197
