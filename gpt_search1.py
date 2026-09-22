@@ -44,6 +44,7 @@ STAGE3_NAME = "stage3_lora_capacity"
 
 METRIC_COLUMNS = [
     "BLEU-1",
+    "BLEU-2",
     "BLEU-4",
     "USR",
     "Distinct-1",

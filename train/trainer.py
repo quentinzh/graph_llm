@@ -1207,8 +1207,10 @@ def append_eval_metrics(
             for ids in group_predict
         ]
         bleu_1 = bleu_score(tokens_test, tokens_predict, n_gram=1)
+        bleu_2 = bleu_score(tokens_test, tokens_predict, n_gram=2)
         bleu_4 = bleu_score(tokens_test, tokens_predict, n_gram=4)
         f.write("BLEU-1 {:7.4f}\n".format(bleu_1))
+        f.write("BLEU-2 {:7.4f}\n".format(bleu_2))
         f.write("BLEU-4 {:7.4f}\n".format(bleu_4))
         usr, usn = unique_sentence_percent(tokens_predict)
         f.write("USR {:7.4f} | USN {:7}\n".format(usr, usn))
@@ -1231,6 +1233,7 @@ def append_eval_metrics(
             f.write("{} {:7.4f}\n".format(key, value))
     return {
         "BLEU-1": bleu_1,
+        "BLEU-2": bleu_2,
         "BLEU-4": bleu_4,
         "USR": usr,
         "Distinct-1": d1,

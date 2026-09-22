@@ -33,6 +33,7 @@ DEFAULT_TOP_M_EVIDENCE = 5
 # 汇总表展示的 test 指标列（仅写 run() 实际返回的键）
 METRIC_COLUMNS = [
     "BLEU-1",
+    "BLEU-2",
     "BLEU-4",
     "USR",
     "Distinct-1",

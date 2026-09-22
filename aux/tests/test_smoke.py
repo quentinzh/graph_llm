@@ -885,6 +885,8 @@ def test_standalone_metrics_available():
     references = [["great", "movie"]]
     generated = [["great", "story"]]
     assert bleu_score(references, generated, n_gram=1) > 0.0
+    b2 = bleu_score(references, generated, n_gram=2)
+    assert 0.0 <= b2 <= 100.0
     scores = rouge_score(["great movie"], ["great story"])
     assert {"rouge_1", "rouge_2", "rouge_4", "rouge_l"}.issubset(scores)
 
