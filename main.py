@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 from graph_llm.config import build_arg_parser, resolve_dataset_paths
+from graph_llm.train.explain_trainer import run_explain
 from graph_llm.train.recommend_trainer import run_recommend
 
 
@@ -37,4 +38,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     seed_everything(args.seed)
     resolve_dataset_paths(args)
-    run_recommend(args)
+    if getattr(args, "mode", "recommend") == "explain":
+        run_explain(args)
+    else:
+        run_recommend(args)

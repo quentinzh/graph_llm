@@ -121,12 +121,40 @@ class SIDRecommender(nn.Module):
         self.use_rating_sid = use_rating
         self.use_popularity_sid = use_popularity
         self.text_positions = text_positions
+        # 证据节点打分（解释阶段辅助损失）
+        self.evidence_scorer = nn.Linear(hidden_dim, 1)
 
     def _rating_bucket(self, rating_raw: float | None) -> int:
         if rating_raw is None:
             return 0
         r = int(round(rating_raw))
         return max(1, min(5, r))
+
+    def _gnn_forward(
+        self,
+        node_emb: torch.Tensor,
+        node_types: torch.Tensor,
+        node_ratings: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        type_vec = self.type_emb(node_types.clamp(0, 1))
+        rating_vec = self.rating_emb(node_ratings.clamp(0, 5))
+        x = self.input_proj(torch.cat([node_emb + type_vec, rating_vec], dim=-1))
+        for conv in self.convs:
+            x = conv(x, edge_index, edge_weight)
+        return x
+
+    def encode_nodes_batch(
+        self,
+        node_emb: torch.Tensor,
+        node_types: torch.Tensor,
+        node_ratings: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """返回 GNN 节点表示（不做图读出）。"""
+        return self._gnn_forward(node_emb, node_types, node_ratings, edge_index, edge_weight)
 
     def encode_history_batch(
         self,
@@ -138,11 +166,7 @@ class SIDRecommender(nn.Module):
         batch_index: torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
-        type_vec = self.type_emb(node_types.clamp(0, 1))
-        rating_vec = self.rating_emb(node_ratings.clamp(0, 5))
-        x = self.input_proj(torch.cat([node_emb + type_vec, rating_vec], dim=-1))
-        for conv in self.convs:
-            x = conv(x, edge_index, edge_weight)
+        x = self._gnn_forward(node_emb, node_types, node_ratings, edge_index, edge_weight)
         return self.readout(x, batch_index, batch_size)
 
     def forward_sid_logits(self, user_repr: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -165,6 +189,73 @@ class SIDRecommender(nn.Module):
         if "pop_logits" in logits and "pop" in targets:
             loss = loss + lambda_pop * F.cross_entropy(logits["pop_logits"], targets["pop"])
         return loss
+
+    def item_rec_loss(
+        self,
+        user_repr: torch.Tensor,
+        target_item_indices: torch.Tensor,
+        item_codes: torch.Tensor,
+        *,
+        lambda_rating: float,
+        lambda_pop: float,
+        text_sid_length: int,
+        use_rating_sid: bool,
+        use_popularity_sid: bool,
+        temperature: float,
+        code_log_priors: list[torch.Tensor] | None = None,
+        pmi_lambda: float = 0.0,
+    ) -> torch.Tensor:
+        """商品级 full-softmax，与推理打分 S(u,i) 一致。"""
+        logits = self.forward_sid_logits(user_repr)
+        log_probs = logits_to_log_probs(logits)
+        scores = vectorized_item_scores(
+            log_probs,
+            item_codes,
+            text_sid_length=text_sid_length,
+            use_rating_sid=use_rating_sid,
+            use_popularity_sid=use_popularity_sid,
+            lambda_rating=lambda_rating,
+            lambda_pop=lambda_pop,
+            code_log_priors=code_log_priors,
+            pmi_lambda=pmi_lambda,
+        )
+        scores = scores / max(float(temperature), 1e-6)
+        return F.cross_entropy(scores, target_item_indices)
+
+    def code_contributions_for_items(
+        self,
+        user_repr: torch.Tensor,
+        item_codes: torch.Tensor,
+        target_item_indices: torch.Tensor,
+        *,
+        lambda_rating: float,
+        lambda_pop: float,
+        text_sid_length: int,
+        use_rating_sid: bool,
+        use_popularity_sid: bool,
+    ) -> torch.Tensor:
+        """目标商品各 SID 位的 log-prob 贡献，用于 rationale 向量 [B, num_positions]。"""
+        logits = self.forward_sid_logits(user_repr)
+        log_probs = logits_to_log_probs(logits)
+        b = user_repr.shape[0]
+        contribs: list[torch.Tensor] = []
+        for j in range(text_sid_length):
+            codes_j = item_codes[target_item_indices, j]
+            contribs.append(log_probs["text"][j].gather(1, codes_j.unsqueeze(1)).squeeze(1))
+        offset = text_sid_length
+        if use_rating_sid and "rating" in log_probs:
+            codes_j = item_codes[target_item_indices, offset]
+            contribs.append(
+                lambda_rating
+                * log_probs["rating"].gather(1, codes_j.unsqueeze(1)).squeeze(1)
+            )
+            offset += 1
+        if use_popularity_sid and "pop" in log_probs:
+            codes_j = item_codes[target_item_indices, offset]
+            contribs.append(
+                lambda_pop * log_probs["pop"].gather(1, codes_j.unsqueeze(1)).squeeze(1)
+            )
+        return torch.stack(contribs, dim=1)
 
     def score_items_from_logprobs(
         self,
@@ -213,6 +304,19 @@ def logits_to_log_probs(logits: dict[str, torch.Tensor]) -> dict[str, torch.Tens
     return out
 
 
+def build_code_log_prior_tensors(
+    sid_bundle: SemanticIDBundle,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> list[torch.Tensor]:
+    """将 bundle 中的 log 先验转为 GPU 张量列表。"""
+    if not sid_bundle.code_log_priors:
+        return []
+    return [
+        torch.tensor(p, device=device, dtype=dtype) for p in sid_bundle.code_log_priors
+    ]
+
+
 def vectorized_item_scores(
     log_probs: dict[str, torch.Tensor | list[torch.Tensor]],
     item_codes: torch.Tensor,
@@ -222,25 +326,38 @@ def vectorized_item_scores(
     use_popularity_sid: bool,
     lambda_rating: float,
     lambda_pop: float,
+    code_log_priors: list[torch.Tensor] | None = None,
+    pmi_lambda: float = 0.0,
 ) -> torch.Tensor:
-    """对 batch 内每个用户计算全商品分数 [B, N]，与逐商品 gather 等价。"""
+    """对 batch 内每个用户计算全商品分数 [B, N]，与 brief 中 S(u,i) 一致（文本位取平均）。"""
     text_lps = log_probs["text"]
     batch_size = text_lps[0].shape[0]
     num_items = item_codes.shape[0]
     scores = torch.zeros(batch_size, num_items, device=item_codes.device, dtype=text_lps[0].dtype)
     for j in range(text_sid_length):
         codes_j = item_codes[:, j]
-        scores += text_lps[j].gather(1, codes_j.unsqueeze(0).expand(batch_size, -1))
+        part = text_lps[j].gather(1, codes_j.unsqueeze(0).expand(batch_size, -1))
+        if pmi_lambda > 0 and code_log_priors and j < len(code_log_priors):
+            prior = code_log_priors[j][codes_j].unsqueeze(0).expand(batch_size, -1)
+            part = part - float(pmi_lambda) * prior
+        scores += part
+    scores = scores / max(text_sid_length, 1)
     offset = text_sid_length
+    pos_idx = text_sid_length
     if use_rating_sid and "rating" in log_probs:
         codes_j = item_codes[:, offset]
-        scores = scores + lambda_rating * log_probs["rating"].gather(
-            1, codes_j.unsqueeze(0).expand(batch_size, -1)
-        )
+        part = log_probs["rating"].gather(1, codes_j.unsqueeze(0).expand(batch_size, -1))
+        if pmi_lambda > 0 and code_log_priors and pos_idx < len(code_log_priors):
+            prior = code_log_priors[pos_idx][codes_j].unsqueeze(0).expand(batch_size, -1)
+            part = part - float(pmi_lambda) * prior
+        scores = scores + lambda_rating * part
         offset += 1
+        pos_idx += 1
     if use_popularity_sid and "pop" in log_probs:
         codes_j = item_codes[:, offset]
-        scores = scores + lambda_pop * log_probs["pop"].gather(
-            1, codes_j.unsqueeze(0).expand(batch_size, -1)
-        )
+        part = log_probs["pop"].gather(1, codes_j.unsqueeze(0).expand(batch_size, -1))
+        if pmi_lambda > 0 and code_log_priors and pos_idx < len(code_log_priors):
+            prior = code_log_priors[pos_idx][codes_j].unsqueeze(0).expand(batch_size, -1)
+            part = part - float(pmi_lambda) * prior
+        scores = scores + lambda_pop * part
     return scores

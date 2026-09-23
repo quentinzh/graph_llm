@@ -53,6 +53,28 @@ def test_hr_ndcg_metrics():
     assert metrics["NDCG@5"] > 0
 
 
+def test_item_rec_loss_backward():
+    model = SIDRecommender(embed_dim=32, hidden_dim=16, gnn_layers=1, text_classes=8, text_positions=4)
+    user_repr = torch.randn(2, 16, requires_grad=True)
+    item_codes = torch.randint(0, 8, (20, 6))
+    item_codes[:, 4] = torch.randint(0, 9, (20,))
+    item_codes[:, 5] = torch.randint(0, 9, (20,))
+    target = torch.tensor([1, 3], dtype=torch.long)
+    loss = model.item_rec_loss(
+        user_repr,
+        target,
+        item_codes,
+        lambda_rating=0.2,
+        lambda_pop=0.1,
+        text_sid_length=4,
+        use_rating_sid=True,
+        use_popularity_sid=True,
+        temperature=4.0,
+    )
+    loss.backward()
+    assert any(p.grad is not None for p in model.parameters())
+
+
 def test_sid_loss_backward():
     model = SIDRecommender(embed_dim=32, hidden_dim=16, gnn_layers=1, text_classes=8)
     user_repr = torch.randn(2, 16, requires_grad=True)

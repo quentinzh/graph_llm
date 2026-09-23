@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 
 def _text_hash(text: str) -> str:
@@ -150,12 +151,15 @@ class RobertaTextEncoder(nn.Module):
         batch_size: int = 16,
         *,
         use_cache: bool = True,
+        show_progress: bool = False,
     ) -> torch.Tensor:
         if not texts:
             return torch.empty((0, self.hidden_size), device=self.device)
         normalized = [t if str(t).strip() else self.EMPTY_TEXT_MARKER for t in texts]
         if not use_cache or self.cache is None:
-            return self._encode_texts_no_cache(normalized, batch_size=batch_size)
+            return self._encode_texts_no_cache(
+                normalized, batch_size=batch_size, show_progress=show_progress
+            )
 
         out = torch.zeros((len(normalized), self.hidden_size), dtype=torch.float32)
         missing_texts: list[str] = []
@@ -168,16 +172,23 @@ class RobertaTextEncoder(nn.Module):
                 missing_texts.append(text)
                 missing_indices.append(idx)
         if missing_texts:
-            encoded = self._encode_texts_no_cache(missing_texts, batch_size=batch_size)
+            encoded = self._encode_texts_no_cache(
+                missing_texts, batch_size=batch_size, show_progress=show_progress
+            )
             for local_i, global_i in enumerate(missing_indices):
                 out[global_i] = encoded[local_i].float()
                 self.cache.set(normalized[global_i], encoded[local_i].cpu())
         return out.to(self.device)
 
     @torch.no_grad()
-    def _encode_texts_no_cache(self, texts: list[str], batch_size: int = 16) -> torch.Tensor:
+    def _encode_texts_no_cache(
+        self, texts: list[str], batch_size: int = 16, *, show_progress: bool = False
+    ) -> torch.Tensor:
         outputs = []
-        for start in range(0, len(texts), batch_size):
+        batch_starts = range(0, len(texts), batch_size)
+        if show_progress:
+            batch_starts = tqdm(batch_starts, desc="RoBERTa encode")
+        for start in batch_starts:
             batch = texts[start : start + batch_size]
             encoded = self.tokenizer(
                 batch,
@@ -218,6 +229,7 @@ class SmokeTextEncoder(nn.Module):
         batch_size: int = 16,
         *,
         use_cache: bool = True,
+        show_progress: bool = False,
     ) -> torch.Tensor:
         if not texts:
             return torch.empty((0, self.hidden_size), device=self.device)

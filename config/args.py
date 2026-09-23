@@ -28,9 +28,40 @@ def build_arg_parser():
     parser.add_argument("--eval_batch_size", default=8, type=int)
     parser.add_argument("--num_workers", default=1, type=int)
     parser.add_argument("--seed", default=5254, type=int)
-    parser.add_argument("--epochs", default=3, type=int)
+    parser.add_argument("--epochs", default=50, type=int)
     parser.add_argument("--learning_rate", default=1e-3, type=float)
-    parser.add_argument("--early_stop_patience", default=2, type=int)
+    parser.add_argument("--early_stop_patience", default=5, type=int)
+    parser.add_argument("--grad_clip_norm", default=1.0, type=float)
+    parser.add_argument(
+        "--rec_loss",
+        choices=["item", "sid", "both"],
+        default="item",
+        help="推荐损失：item=商品级 full-softmax（默认）；sid=逐位置 CE；both=消融用",
+    )
+    parser.add_argument("--rec_temperature", default=4.0, type=float, help="L_rec 全商品 softmax 温度 τ")
+    parser.add_argument(
+        "--score_pmi_lambda",
+        default=0.0,
+        type=float,
+        help="推理时 PMI 校正强度 λ；0 表示不校正",
+    )
+    parser.add_argument(
+        "--auto_pmi_lambda",
+        action="store_true",
+        help="验证集上搜索 PMI λ，仅当 NDCG@10 不低于 λ=0 时采用更优 λ",
+    )
+    parser.add_argument(
+        "--eval_baseline",
+        choices=["model", "popularity", "random"],
+        default="model",
+        help="评估打分来源：model=训练模型；popularity/random=基线校验",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["recommend", "explain"],
+        default="recommend",
+        help="recommend=SID 推荐；explain=解释生成（需已有推荐 checkpoint）",
+    )
     parser.add_argument("--selector_hidden", default=256, type=int)
     parser.add_argument("--gnn_layers", default=2, type=int)
     parser.add_argument("--magnet_q", default=0.15, type=float)
@@ -108,4 +139,41 @@ def build_arg_parser():
         type=str,
     )
     parser.add_argument("--log_dir", default=str(PACKAGE_ROOT / "log"), type=str)
+    # --- 解释阶段 ---
+    parser.add_argument(
+        "--llm_model_path",
+        default=str(PACKAGE_ROOT / "pretrain_llm" / "qwen3-4b"),
+        type=str,
+    )
+    parser.add_argument("--explain_epochs", default=5, type=int)
+    parser.add_argument("--explain_early_stop_patience", default=2, type=int)
+    parser.add_argument("--lambda_selector", default=0.1, type=float)
+    parser.add_argument("--feature_gamma", default=2.0, type=float, help="feature 加权 CE 系数 γ")
+    parser.add_argument("--tail_alpha", default=0.5, type=float)
+    parser.add_argument("--tail_weight_min", default=0.5, type=float)
+    parser.add_argument("--tail_weight_max", default=2.0, type=float)
+    parser.add_argument("--top_m_evidence", default=5, type=int)
+    parser.add_argument("--max_generation_tokens", default=40, type=int)
+    parser.add_argument("--gen_temperature", default=0.9, type=float)
+    parser.add_argument("--gen_top_p", default=0.92, type=float)
+    parser.add_argument("--gen_repetition_penalty", default=1.15, type=float)
+    parser.add_argument("--explain_unfreeze_shared", action="store_true", default=False)
+    parser.add_argument(
+        "--joint_explain_rec",
+        action="store_true",
+        help="联合微调：解释损失回传共享 GNN/selector（默认分阶段冻结推荐）",
+    )
+    parser.add_argument(
+        "--recommend_ckpt",
+        default="",
+        type=str,
+        help="解释阶段加载的推荐 checkpoint 路径；空则使用 ckpt_dir/.../recommend/sid_recommender.bin",
+    )
     return parser
+
+
+def default_qwen_model_path() -> str:
+    local = PACKAGE_ROOT / "pretrain_llm" / "qwen3-4b"
+    if _is_local_model_dir(local):
+        return str(local.resolve())
+    return str(local)

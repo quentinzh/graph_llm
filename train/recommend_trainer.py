@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import math
 import random
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,8 +16,12 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from graph_llm.dataload.embeddings import RobertaTextEncoder, SmokeTextEncoder
-from graph_llm.dataload.history_graph import batch_history_graphs, build_history_user_graph
+from graph_llm.dataload.embeddings import RobertaTextEncoder, SmokeTextEncoder, _text_hash
+from graph_llm.dataload.history_graph import (
+    _split_fragments,
+    batch_history_graphs,
+    build_history_user_graph,
+)
 from graph_llm.dataload.sequential_data import (
     InteractionRecord,
     SequentialDatasetBundle,
@@ -34,11 +40,13 @@ from graph_llm.metrics.rec_ranking import evaluate_ranking
 from graph_llm.models.item_search import (
     ItemNeighborIndex,
     exact_top_k,
+    graph_search_seed_items,
     graph_search_top_k,
     recovery_rate,
 )
 from graph_llm.models.sid_recommender import (
     SIDRecommender,
+    build_code_log_prior_tensors,
     build_item_code_matrix,
     logits_to_log_probs,
     vectorized_item_scores,
@@ -53,6 +61,26 @@ def default_preferred_device_id() -> int:
     raise RuntimeError("No CUDA devices are available.")
 
 
+def _append_jsonl(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _popularity_scores(sid_bundle: SemanticIDBundle, num_items: int, device: torch.device) -> torch.Tensor:
+    """按校准快照流行度（distinct_users）的全局排序分。"""
+    scores = torch.zeros(num_items, device=device, dtype=torch.float32)
+    for rec in sid_bundle.items.values():
+        if 0 <= rec.item_index < num_items:
+            scores[rec.item_index] = math.log1p(float(rec.distinct_users))
+    return scores
+
+
+def _random_user_scores(num_items: int, device: torch.device, rng: random.Random) -> torch.Tensor:
+    perm = torch.tensor(rng.sample(range(num_items), num_items), device=device, dtype=torch.float32)
+    return perm
+
+
 @dataclass
 class RecommendSample:
     interaction_id: int
@@ -60,6 +88,15 @@ class RecommendSample:
     target_item_index: int
     target_raw_item: str
     split: str  # train_rec | val | test
+
+
+@dataclass
+class NodeEmbeddingStore:
+    """训练/评估热循环用：商品矩阵 + 片段内存缓存，避免每 batch RoBERTa/磁盘读。"""
+
+    item_emb_matrix: torch.Tensor
+    frag_cache: dict[str, torch.Tensor]
+    hidden_size: int
 
 
 class RecommendDataset(Dataset):
@@ -184,21 +221,96 @@ def _collate_recommend_batch(
     }
 
 
-def _encode_graph_nodes(roberta: RobertaTextEncoder, texts: list[str], device: torch.device) -> torch.Tensor:
-    if not texts:
-        return torch.empty((0, roberta.hidden_size), device=device)
-    return roberta.encode_texts(texts, batch_size=32)
+def _collect_unique_fragments(bundle: SequentialDatasetBundle) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for rec in bundle.interactions:
+        frags = _split_fragments(rec.review_text) or _split_fragments(rec.summary)
+        for frag in frags:
+            key = _text_hash(frag)
+            if key not in seen:
+                seen.add(key)
+                ordered.append(frag)
+    return ordered
+
+
+def _precompute_fragment_cache(
+    bundle: SequentialDatasetBundle,
+    roberta: RobertaTextEncoder | SmokeTextEncoder,
+    *,
+    batch_size: int = 64,
+) -> dict[str, torch.Tensor]:
+    frags = _collect_unique_fragments(bundle)
+    cache: dict[str, torch.Tensor] = {}
+    if not frags:
+        return cache
+    pbar = tqdm(total=len(frags), desc="RoBERTa encode fragments", unit="frag")
+    for start in range(0, len(frags), batch_size):
+        chunk = frags[start : start + batch_size]
+        vecs = roberta.encode_texts(chunk, batch_size=batch_size, use_cache=False, show_progress=False)
+        for i, frag in enumerate(chunk):
+            cache[_text_hash(frag)] = vecs[i].detach().cpu().float()
+        pbar.update(len(chunk))
+    pbar.close()
+    return cache
+
+
+def _build_item_emb_matrix(
+    text_emb: dict[str, np.ndarray],
+    sid_bundle: SemanticIDBundle,
+    device: torch.device,
+) -> torch.Tensor:
+    rows = [
+        text_emb[sid_bundle.item_index_to_raw[i]] for i in range(len(sid_bundle.item_index_to_raw))
+    ]
+    return torch.tensor(np.stack(rows), dtype=torch.float32, device=device)
+
+
+def _encode_graph_nodes(
+    node_texts: list[str],
+    node_types: np.ndarray,
+    node_item_indices: np.ndarray,
+    store: NodeEmbeddingStore,
+    device: torch.device,
+) -> torch.Tensor:
+    n = len(node_texts)
+    if n == 0:
+        return torch.empty((0, store.hidden_size), device=device)
+    out = torch.empty((n, store.hidden_size), dtype=torch.float32, device=device)
+    item_mask = node_types == 1
+    frag_mask = ~item_mask
+    if item_mask.any():
+        idx = torch.tensor(node_item_indices[item_mask], device=device, dtype=torch.long)
+        out[item_mask] = store.item_emb_matrix[idx]
+    if frag_mask.any():
+        frag_rows = []
+        for i in np.where(frag_mask)[0]:
+            key = _text_hash(node_texts[i])
+            vec = store.frag_cache.get(key)
+            if vec is None:
+                vec = torch.zeros(store.hidden_size, dtype=torch.float32)
+            frag_rows.append(vec)
+        out[frag_mask] = torch.stack(frag_rows).to(device)
+    return out
 
 
 def _forward_batch(
     model: SIDRecommender,
-    roberta: RobertaTextEncoder,
+    node_store: NodeEmbeddingStore,
     batch_dict: dict,
     device: torch.device,
     args,
-) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-    node_emb = _encode_graph_nodes(roberta, batch_dict["node_texts"], device)
+    item_codes: torch.Tensor,
+    code_log_priors: list[torch.Tensor],
+) -> dict[str, torch.Tensor | float]:
     batched = batch_dict["batched"]
+    node_emb = _encode_graph_nodes(
+        batch_dict["node_texts"],
+        batched["node_types"],
+        batched["node_item_indices"],
+        node_store,
+        device,
+    )
     if node_emb.numel() == 0:
         user_repr = model.readout.default_user.unsqueeze(0).expand(len(batch_dict["samples"]), -1)
     else:
@@ -215,24 +327,57 @@ def _forward_batch(
             batch_index,
             len(batch_dict["samples"]),
         )
-    logits = model.forward_sid_logits(user_repr)
     targets = {
         "text": batch_dict["text_targets"],
         "rating": batch_dict["rating_targets"],
         "pop": batch_dict["pop_targets"],
     }
-    loss = model.sid_loss(
-        logits,
-        targets,
-        lambda_rating=args.lambda_rating,
-        lambda_pop=args.lambda_pop,
-    )
-    return logits, loss
+    logits = model.forward_sid_logits(user_repr)
+    rec_mode = getattr(args, "rec_loss", "item")
+    loss_sid = torch.tensor(0.0, device=device)
+    loss_item = torch.tensor(0.0, device=device)
+    if rec_mode in {"sid", "both"}:
+        loss_sid = model.sid_loss(
+            logits,
+            targets,
+            lambda_rating=args.lambda_rating,
+            lambda_pop=args.lambda_pop,
+        )
+    if rec_mode in {"item", "both"}:
+        target_idx = torch.tensor(
+            [s.target_item_index for s in batch_dict["samples"]],
+            device=device,
+            dtype=torch.long,
+        )
+        loss_item = model.item_rec_loss(
+            user_repr,
+            target_idx,
+            item_codes,
+            lambda_rating=args.lambda_rating,
+            lambda_pop=args.lambda_pop,
+            text_sid_length=args.text_sid_length,
+            use_rating_sid=args.use_rating_sid,
+            use_popularity_sid=args.use_popularity_sid,
+            temperature=args.rec_temperature,
+            code_log_priors=code_log_priors if args.score_pmi_lambda > 0 else None,
+            pmi_lambda=args.score_pmi_lambda,
+        )
+    if rec_mode == "sid":
+        total = loss_sid
+    elif rec_mode == "item":
+        total = loss_item
+    else:
+        total = loss_sid + loss_item
+    return {
+        "loss": total,
+        "loss_sid": float(loss_sid.detach().cpu()),
+        "loss_item": float(loss_item.detach().cpu()),
+    }
 
 
 def _rank_users(
-    model: SIDRecommender,
-    roberta: RobertaTextEncoder,
+    model: SIDRecommender | None,
+    node_store: NodeEmbeddingStore | None,
     samples: list[RecommendSample],
     bundle: SequentialDatasetBundle,
     sid_bundle: SemanticIDBundle,
@@ -240,6 +385,11 @@ def _rank_users(
     neighbor_index: ItemNeighborIndex,
     args,
     device: torch.device,
+    popularity_scores: torch.Tensor | None = None,
+    code_log_priors: list[torch.Tensor] | None = None,
+    desc: str = "eval",
+    leave: bool = True,
+    search_mode: str | None = None,
 ) -> tuple[list[list[int]], dict[str, float]]:
     ks = (5, 10, 20)
     targets = []
@@ -249,6 +399,11 @@ def _rank_users(
     rng = random.Random(args.seed)
     lambda_rating = args.lambda_rating
     lambda_pop = args.lambda_pop
+    baseline = getattr(args, "eval_baseline", "model")
+    mode = search_mode or args.search_mode
+    num_items = item_codes.shape[0]
+    rank_positions: list[float] = []
+    score_stds: list[float] = []
 
     loader = DataLoader(
         RecommendDataset(samples),
@@ -256,41 +411,59 @@ def _rank_users(
         shuffle=False,
         collate_fn=lambda batch: batch,
     )
-    for batch in loader:
+    for batch in tqdm(loader, desc=desc, leave=leave):
         if isinstance(batch, RecommendSample):
             batch = [batch]
         batch_dict = _collate_recommend_batch(list(batch), bundle, sid_bundle, device)
-        with torch.no_grad():
-            node_emb = _encode_graph_nodes(roberta, batch_dict["node_texts"], device)
-            batched = batch_dict["batched"]
-            edge_index = torch.tensor(batched["edge_index"], device=device, dtype=torch.long)
-            edge_weight = torch.tensor(batched["edge_weight"], device=device, dtype=torch.float32)
-            batch_index = torch.tensor(batched["batch_index"], device=device, dtype=torch.long)
-            node_types = torch.tensor(batched["node_types"], device=device, dtype=torch.long)
-            if node_emb.numel() == 0:
-                user_repr = model.readout.default_user.unsqueeze(0).expand(len(batch), -1)
-            else:
-                user_repr = model.encode_history_batch(
-                    node_emb,
-                    node_types,
-                    batch_dict["node_ratings"],
-                    edge_index,
-                    edge_weight if edge_weight.numel() else None,
-                    batch_index,
-                    len(batch),
+        if baseline == "model":
+            assert model is not None and node_store is not None
+            with torch.no_grad():
+                batched = batch_dict["batched"]
+                node_emb = _encode_graph_nodes(
+                    batch_dict["node_texts"],
+                    batched["node_types"],
+                    batched["node_item_indices"],
+                    node_store,
+                    device,
                 )
-            logits = model.forward_sid_logits(user_repr)
-            log_probs = logits_to_log_probs(logits)
+                edge_index = torch.tensor(batched["edge_index"], device=device, dtype=torch.long)
+                edge_weight = torch.tensor(batched["edge_weight"], device=device, dtype=torch.float32)
+                batch_index = torch.tensor(batched["batch_index"], device=device, dtype=torch.long)
+                node_types = torch.tensor(batched["node_types"], device=device, dtype=torch.long)
+                if node_emb.numel() == 0:
+                    user_repr = model.readout.default_user.unsqueeze(0).expand(len(batch), -1)
+                else:
+                    user_repr = model.encode_history_batch(
+                        node_emb,
+                        node_types,
+                        batch_dict["node_ratings"],
+                        edge_index,
+                        edge_weight if edge_weight.numel() else None,
+                        batch_index,
+                        len(batch),
+                    )
+                logits = model.forward_sid_logits(user_repr)
+                log_probs = logits_to_log_probs(logits)
+            batch_scores = vectorized_item_scores(
+                log_probs,
+                item_codes,
+                text_sid_length=sid_bundle.text_sid_length,
+                use_rating_sid=sid_bundle.use_rating_sid,
+                use_popularity_sid=sid_bundle.use_popularity_sid,
+                lambda_rating=lambda_rating,
+                lambda_pop=lambda_pop,
+                code_log_priors=code_log_priors,
+                pmi_lambda=args.score_pmi_lambda,
+            )
+        elif baseline == "popularity":
+            assert popularity_scores is not None
+            batch_scores = popularity_scores.unsqueeze(0).expand(len(batch), -1).clone()
+        else:
+            batch_scores = torch.stack(
+                [_random_user_scores(num_items, device, rng) for _ in range(len(batch))],
+                dim=0,
+            )
 
-        batch_scores = vectorized_item_scores(
-            log_probs,
-            item_codes,
-            text_sid_length=sid_bundle.text_sid_length,
-            use_rating_sid=sid_bundle.use_rating_sid,
-            use_popularity_sid=sid_bundle.use_popularity_sid,
-            lambda_rating=lambda_rating,
-            lambda_pop=lambda_pop,
-        )
         for local_i, sample in enumerate(batch):
             hist = batch_dict["histories"][local_i]
             exclude = set() if allow_repeat else history_item_indices(hist)
@@ -302,11 +475,23 @@ def _rank_users(
                     scores[ex] = float("-inf")
                 return scores
 
+            scored = sf()
+            if scored.numel() > 0:
+                finite = scored[torch.isfinite(scored)]
+                if finite.numel() > 0:
+                    score_stds.append(float(finite.std(unbiased=False).item()))
+                tgt = sample.target_item_index
+                if 0 <= tgt < scored.numel() and torch.isfinite(scored[tgt]):
+                    rank_positions.append(float((scored > scored[tgt]).sum().item() + 1))
+
             exact_items, _ = exact_top_k(sf, set(), max(ks))
-            if args.search_mode == "graph":
-                seeds = list(history_item_indices(hist))[:8]
-                if not seeds:
-                    seeds = [sample.target_item_index]
+            if mode == "graph" and baseline == "model":
+                hist_items = list(history_item_indices(hist))
+                seeds = graph_search_seed_items(
+                    neighbor_index,
+                    hist_items,
+                    fallback_item=sample.target_item_index,
+                )
                 approx_items, _ = graph_search_top_k(
                     sf,
                     neighbor_index,
@@ -325,6 +510,12 @@ def _rank_users(
             ranked_lists.append(ranked)
 
     metrics = evaluate_ranking(targets, ranked_lists, ks=ks)
+    metrics["eval_samples"] = float(len(targets))
+    if rank_positions:
+        metrics["target_rank_mean"] = float(sum(rank_positions) / len(rank_positions))
+        metrics["target_rank_median"] = float(sorted(rank_positions)[len(rank_positions) // 2])
+    if score_stds:
+        metrics["score_std_mean"] = float(sum(score_stds) / len(score_stds))
     if recoveries:
         metrics["search_recovery@maxk"] = float(sum(recoveries) / len(recoveries))
     return ranked_lists, metrics
@@ -403,12 +594,73 @@ def run_recommend(args) -> dict:
     ).to(device)
 
     item_codes = build_item_code_matrix(sid_bundle, device)
+    code_log_priors = build_code_log_prior_tensors(sid_bundle, device)
+    popularity_scores = _popularity_scores(sid_bundle, len(sid_bundle.item_index_to_raw), device)
     item_vectors = np.stack(
         [text_emb[sid_bundle.item_index_to_raw[i]] for i in range(len(sid_bundle.item_index_to_raw))]
     )
     if args.max_train_batches and args.max_train_batches > 0:
         args.search_mode = "exact"
     neighbor_index = ItemNeighborIndex(item_vectors, neighbors=args.search_neighbors, seed=args.seed)
+
+    item_emb_matrix = _build_item_emb_matrix(text_emb, sid_bundle, device)
+    frag_cache = _precompute_fragment_cache(bundle, roberta, batch_size=args.roberta_encode_batch_size)
+    node_store = NodeEmbeddingStore(
+        item_emb_matrix=item_emb_matrix,
+        frag_cache=frag_cache,
+        hidden_size=roberta.hidden_size,
+    )
+
+    log_dir = Path(args.log_dir) / args.dataset_name.replace("/", "__")
+    loss_log_path = log_dir / "train_losses.jsonl"
+    ckpt_dir = Path(args.ckpt_dir) / args.dataset_name.replace("/", "__") / "recommend"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline = getattr(args, "eval_baseline", "model")
+    if baseline != "model":
+        eval_limit = args.max_eval_batches
+        eval_val = val_samples[: eval_limit * args.eval_batch_size] if eval_limit else val_samples
+        eval_test = test_samples[: eval_limit * args.eval_batch_size] if eval_limit else test_samples
+        _, val_metrics = _rank_users(
+            None,
+            None,
+            eval_val,
+            bundle,
+            sid_bundle,
+            item_codes,
+            neighbor_index,
+            args,
+            device,
+            popularity_scores=popularity_scores,
+            code_log_priors=code_log_priors,
+            desc=f"val[{baseline}]",
+            search_mode="exact",
+        )
+        _, test_metrics = _rank_users(
+            None,
+            None,
+            eval_test,
+            bundle,
+            sid_bundle,
+            item_codes,
+            neighbor_index,
+            args,
+            device,
+            popularity_scores=popularity_scores,
+            code_log_priors=code_log_priors,
+            desc=f"test[{baseline}]",
+            search_mode="exact",
+        )
+        out = {
+            "baseline": baseline,
+            "val": val_metrics,
+            "test": test_metrics,
+            "sid_fingerprint": sid_bundle.fingerprint,
+        }
+        log_path = log_dir / "recommend_metrics.json"
+        log_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        print(json.dumps(out, indent=2))
+        return out
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
     def _collate_samples(batch: list[RecommendSample]) -> list[RecommendSample]:
@@ -424,56 +676,183 @@ def run_recommend(args) -> dict:
     ckpt_dir = Path(args.ckpt_dir) / args.dataset_name.replace("/", "__") / "recommend"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_ndcg = float("-inf")
+    patience_left = int(args.early_stop_patience)
 
     max_batches = args.max_train_batches if args.max_train_batches > 0 else None
-    for epoch in range(args.epochs):
+    train_steps_per_epoch = len(train_loader)
+    if max_batches:
+        train_steps_per_epoch = min(train_steps_per_epoch, max_batches)
+    epoch_pbar = tqdm(range(args.epochs), desc="epochs", unit="ep")
+    for epoch in epoch_pbar:
         model.train()
-        for step, batch in enumerate(train_loader):
+        epoch_losses: dict[str, list[float]] = defaultdict(list)
+        for step, batch in enumerate(
+            tqdm(
+                train_loader,
+                total=train_steps_per_epoch,
+                desc=f"train e{epoch + 1}",
+                leave=False,
+            )
+        ):
             if max_batches and step >= max_batches:
                 break
             if isinstance(batch, RecommendSample):
                 batch = [batch]
             batch_dict = _collate_recommend_batch(list(batch), bundle, sid_bundle, device)
-            _, loss = _forward_batch(model, roberta, batch_dict, device, args)
+            out_loss = _forward_batch(
+                model, node_store, batch_dict, device, args, item_codes, code_log_priors
+            )
+            loss = out_loss["loss"]
             optimizer.zero_grad()
             loss.backward()
+            if args.grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
             optimizer.step()
+            epoch_losses["loss_total"].append(float(loss.detach().cpu()))
+            epoch_losses["loss_sid"].append(float(out_loss["loss_sid"]))
+            epoch_losses["loss_item"].append(float(out_loss["loss_item"]))
 
         model.eval()
+        eval_limit_batches = args.max_eval_batches
+        eval_val = val_samples[: eval_limit_batches * args.eval_batch_size] if eval_limit_batches else val_samples
         _, val_metrics = _rank_users(
             model,
-            roberta,
-            val_samples[: args.max_eval_batches * args.eval_batch_size]
-            if args.max_eval_batches
-            else val_samples,
+            node_store,
+            eval_val,
             bundle,
             sid_bundle,
             item_codes,
             neighbor_index,
             args,
             device,
+            popularity_scores=popularity_scores,
+            code_log_priors=code_log_priors,
+            desc=f"val[e{epoch + 1}]",
+            leave=False,
+            search_mode="exact",
         )
         ndcg10 = float(val_metrics.get("NDCG@10", 0.0))
-        if ndcg10 > best_ndcg:
+        record = {
+            "stage": "recommend",
+            "epoch": epoch + 1,
+            "rec_loss_mode": getattr(args, "rec_loss", "item"),
+            "train_loss_total": sum(epoch_losses["loss_total"]) / max(len(epoch_losses["loss_total"]), 1),
+            "train_loss_sid": sum(epoch_losses["loss_sid"]) / max(len(epoch_losses["loss_sid"]), 1),
+            "train_loss_item": sum(epoch_losses["loss_item"]) / max(len(epoch_losses["loss_item"]), 1),
+            "val": val_metrics,
+        }
+        _append_jsonl(loss_log_path, record)
+        print(
+            f"epoch {epoch + 1} losses: total={record['train_loss_total']:.4f} "
+            f"sid={record['train_loss_sid']:.4f} item={record['train_loss_item']:.4f} "
+            f"val NDCG@10={ndcg10:.6f} HR@10={val_metrics.get('HR@10', 0):.6f}"
+        )
+        if ndcg10 > best_ndcg + 1e-9:
             best_ndcg = ndcg10
+            patience_left = int(args.early_stop_patience)
             torch.save(model.state_dict(), ckpt_dir / "sid_recommender.bin")
             print(f"save recommend checkpoint (valid NDCG@10={ndcg10:.6f})")
+        else:
+            patience_left -= 1
+            if patience_left <= 0:
+                print(f"early stop at epoch {epoch + 1} (patience={args.early_stop_patience})")
+                break
 
+    epoch_pbar.close()
     model.eval()
     if (ckpt_dir / "sid_recommender.bin").is_file():
         model.load_state_dict(torch.load(ckpt_dir / "sid_recommender.bin", map_location=device, weights_only=True))
+
+    if getattr(args, "auto_pmi_lambda", False):
+        eval_limit = args.max_eval_batches
+        eval_val = val_samples[: eval_limit * args.eval_batch_size] if eval_limit else val_samples
+        saved_lambda = float(args.score_pmi_lambda)
+        args.score_pmi_lambda = 0.0
+        _, base_val = _rank_users(
+            model,
+            node_store,
+            eval_val,
+            bundle,
+            sid_bundle,
+            item_codes,
+            neighbor_index,
+            args,
+            device,
+            popularity_scores=popularity_scores,
+            code_log_priors=code_log_priors,
+            desc="val[pmi_base]",
+            search_mode="exact",
+        )
+        base_ndcg = float(base_val.get("NDCG@10", 0.0))
+        best_lam = 0.0
+        best_ndcg = base_ndcg
+        for lam in (0.25, 0.5, 1.0):
+            args.score_pmi_lambda = lam
+            _, vm = _rank_users(
+                model,
+                node_store,
+                eval_val,
+                bundle,
+                sid_bundle,
+                item_codes,
+                neighbor_index,
+                args,
+                device,
+                popularity_scores=popularity_scores,
+                code_log_priors=code_log_priors,
+                desc=f"val[pmi_{lam}]",
+                search_mode="exact",
+            )
+            nd = float(vm.get("NDCG@10", 0.0))
+            if nd >= base_ndcg - 1e-9 and nd >= best_ndcg:
+                best_ndcg = nd
+                best_lam = lam
+        args.score_pmi_lambda = best_lam if best_lam > 0 else saved_lambda
+        print(f"auto PMI: base NDCG@10={base_ndcg:.6f} chosen lambda={args.score_pmi_lambda}")
+
+    model.eval()
     eval_limit = args.max_eval_batches
     eval_val = val_samples[: eval_limit * args.eval_batch_size] if eval_limit else val_samples
     eval_test = test_samples[: eval_limit * args.eval_batch_size] if eval_limit else test_samples
     _, val_metrics = _rank_users(
-        model, roberta, eval_val, bundle, sid_bundle, item_codes, neighbor_index, args, device
+        model,
+        node_store,
+        eval_val,
+        bundle,
+        sid_bundle,
+        item_codes,
+        neighbor_index,
+        args,
+        device,
+        popularity_scores=popularity_scores,
+        code_log_priors=code_log_priors,
+        desc="val[final]",
+        search_mode="exact",
     )
     _, test_metrics = _rank_users(
-        model, roberta, eval_test, bundle, sid_bundle, item_codes, neighbor_index, args, device
+        model,
+        node_store,
+        eval_test,
+        bundle,
+        sid_bundle,
+        item_codes,
+        neighbor_index,
+        args,
+        device,
+        popularity_scores=popularity_scores,
+        code_log_priors=code_log_priors,
+        desc="test[final]",
+        search_mode="exact",
     )
 
-    out = {"val": val_metrics, "test": test_metrics, "sid_fingerprint": sid_bundle.fingerprint}
-    log_path = Path(args.log_dir) / args.dataset_name / "recommend_metrics.json"
+    out = {
+        "val": val_metrics,
+        "test": test_metrics,
+        "sid_fingerprint": sid_bundle.fingerprint,
+        "score_pmi_lambda": args.score_pmi_lambda,
+        "rec_loss": getattr(args, "rec_loss", "item"),
+    }
+    log_path = log_dir / "recommend_metrics.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
     print(json.dumps(out, indent=2))

@@ -6,12 +6,14 @@ import hashlib
 import json
 import math
 import os
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from graph_llm.dataload.sequential_data import (
     InteractionRecord,
@@ -47,6 +49,8 @@ class SemanticIDBundle:
     pop_bucket_edges: list[float]
     global_mean_rating: float | None
     collision_rate: float
+    # 各 SID 位置边际 log 先验 log P_calib(c)，用于推理 PMI 校正；每元素 shape [num_classes]
+    code_log_priors: list[list[float]] = field(default_factory=list)
 
     def sid_length(self) -> int:
         n = self.text_sid_length
@@ -191,6 +195,20 @@ def _build_rating_pop(
     return smooth, rating_code, pop_code, edges, global_mean, pop_edges, distinct_users
 
 
+@contextmanager
+def _suppress_c_stderr():
+    """faiss 通过 C fprintf(stderr) 打日志，Python redirect_stderr 无效。"""
+    stderr_fd = 2
+    saved = os.dup(stderr_fd)
+    try:
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), stderr_fd)
+        yield
+    finally:
+        os.dup2(saved, stderr_fd)
+        os.close(saved)
+
+
 def _train_text_codes(
     vectors: np.ndarray,
     *,
@@ -209,25 +227,26 @@ def _train_text_codes(
     ncentroids = min(codebook_size, max(n // 5, 2))
     if n < ncentroids:
         raise ValueError(
-            f"校准商品向量数 {n} 少于聚类中心 {ncentroids}，请减小 codebook 或增大 calib 集"
+            f"训练商品向量数 {n} 少于聚类中心 {ncentroids}，请减小 codebook 或增大训练集"
         )
     vectors = np.ascontiguousarray(vectors.astype("float32"))
     opq_matrix = None
     try:
         opq = faiss.OPQMatrix(dim, text_sid_length)
-        opq.train(vectors)
+        with _suppress_c_stderr():
+            opq.train(vectors)
         opq.apply_py(vectors)
         opq_matrix = faiss.vector_to_array(opq.A).reshape(dim, dim).copy()
-    except Exception:
-        # smoke 或小样本时允许退化为无 OPQ 的分段 PQ
-        pass
+    except Exception as exc:
+        print(f"WARNING: OPQ 训练失败，退化为纯 PQ: {exc}")
     codebooks: list[np.ndarray] = []
-    for seg in range(text_sid_length):
+    for seg in tqdm(range(text_sid_length), desc="PQ kmeans"):
         start = seg * sub_dim
         end = start + sub_dim
         seg_x = vectors[:, start:end]
         kmeans = faiss.Kmeans(sub_dim, ncentroids, niter=20, seed=seed, verbose=False)
-        kmeans.train(seg_x)
+        with _suppress_c_stderr():
+            kmeans.train(seg_x)
         codebooks.append(kmeans.centroids.copy())
     return codebooks, opq_matrix
 
@@ -254,6 +273,66 @@ def _encode_text_codes(
     return codes
 
 
+def _compute_code_log_priors(
+    all_raw_items: list[str],
+    items: dict[str, ItemSIDRecord],
+    *,
+    text_sid_length: int,
+    text_codebook_size: int,
+    use_rating_sid: bool,
+    use_popularity_sid: bool,
+    smooth: float = 1.0,
+) -> list[list[float]]:
+    """在固定商品 SID 上统计各码位边际分布，返回 log 先验（加性平滑）。"""
+    rows: list[tuple[int, ...]] = []
+    for raw in all_raw_items:
+        rec = items[raw]
+        codes = list(rec.text_codes)
+        if use_rating_sid:
+            codes.append(rec.rating_code)
+        if use_popularity_sid:
+            codes.append(rec.pop_code)
+        rows.append(tuple(codes))
+    if not rows:
+        return []
+    length = len(rows[0])
+    priors: list[list[float]] = []
+    offset = 0
+    for j in range(text_sid_length):
+        n_cls = text_codebook_size
+        counts = np.zeros(n_cls, dtype=np.float64)
+        for row in rows:
+            c = row[j]
+            if 0 <= c < n_cls:
+                counts[c] += 1.0
+        denom = counts.sum() + smooth * n_cls
+        prob = (counts + smooth) / max(denom, 1e-12)
+        priors.append(np.log(prob).tolist())
+    offset = text_sid_length
+    if use_rating_sid:
+        n_cls = 9
+        counts = np.zeros(n_cls, dtype=np.float64)
+        for row in rows:
+            c = row[offset]
+            if 0 <= c < n_cls:
+                counts[c] += 1.0
+        denom = counts.sum() + smooth * n_cls
+        prob = (counts + smooth) / max(denom, 1e-12)
+        priors.append(np.log(prob).tolist())
+        offset += 1
+    if use_popularity_sid:
+        n_cls = 9
+        counts = np.zeros(n_cls, dtype=np.float64)
+        for row in rows:
+            c = row[offset]
+            if 0 <= c < n_cls:
+                counts[c] += 1.0
+        denom = counts.sum() + smooth * n_cls
+        prob = (counts + smooth) / max(denom, 1e-12)
+        priors.append(np.log(prob).tolist())
+    return priors
+
+
 def build_semantic_ids(
     bundle: SequentialDatasetBundle,
     text_embeddings: dict[str, np.ndarray],
@@ -275,15 +354,23 @@ def build_semantic_ids(
     if args.max_train_batches and args.max_train_batches > 0:
         codebook_size = int(args.smoke_codebook_size)
 
-    calib_items = sorted({r.raw_item for r in calib_records})
+    # 文本 OPQ+PQ 为无监督量化，用全量商品向量训练；rating/pop 仍仅用 calib 交互
+    all_vecs = np.stack(
+        [text_embeddings[item] for item in all_raw_items if item in text_embeddings],
+        axis=0,
+    )
+    if all_vecs.shape[0] == 0:
+        raise ValueError("全量商品无文本向量")
+    norms = np.linalg.norm(all_vecs, axis=1)
+    train_vecs = all_vecs[norms > 0.5]
+    if train_vecs.shape[0] == 0:
+        raise ValueError("无有效商品文本向量（可能全为零向量）")
     if args.max_train_batches and args.max_train_batches > 0:
-        calib_items = calib_items[: max(codebook_size * 10, 64)]
-    calib_vecs = np.stack([text_embeddings[item] for item in calib_items if item in text_embeddings])
-    if calib_vecs.shape[0] == 0:
-        raise ValueError("校准集商品无文本向量")
+        cap = max(codebook_size * 10, 64)
+        train_vecs = train_vecs[:cap]
 
     codebooks, opq_matrix = _train_text_codes(
-        calib_vecs,
+        train_vecs,
         text_sid_length=args.text_sid_length,
         codebook_size=codebook_size,
         seed=args.quant_seed,
@@ -323,6 +410,14 @@ def build_semantic_ids(
     collision_rate = 1.0 - unique / max(len(sid_strings), 1)
 
     fp = _fingerprint_payload(args, len(calib_records))
+    code_log_priors = _compute_code_log_priors(
+        all_raw_items,
+        items,
+        text_sid_length=args.text_sid_length,
+        text_codebook_size=codebook_size,
+        use_rating_sid=args.use_rating_sid,
+        use_popularity_sid=args.use_popularity_sid,
+    )
     return SemanticIDBundle(
         fingerprint=fp,
         text_sid_length=args.text_sid_length,
@@ -336,6 +431,7 @@ def build_semantic_ids(
         pop_bucket_edges=pop_edges if isinstance(pop_edges, list) else [],
         global_mean_rating=global_mean,
         collision_rate=collision_rate,
+        code_log_priors=code_log_priors,
     )
 
 
@@ -351,6 +447,7 @@ def save_sid_bundle(path: Path, bundle: SemanticIDBundle) -> None:
         "pop_bucket_edges": bundle.pop_bucket_edges,
         "global_mean_rating": bundle.global_mean_rating,
         "collision_rate": bundle.collision_rate,
+        "code_log_priors": bundle.code_log_priors,
         "items": {
             k: {
                 "item_index": v.item_index,
@@ -377,10 +474,20 @@ def encode_all_item_texts(
 ) -> dict[str, np.ndarray]:
     raw_items = sorted(bundle.item2index.keys())
     texts = [item_catalog_text(bundle.item_meta.get(r, {})) for r in raw_items]
-    vecs = encoder.encode_texts(texts, batch_size=batch_size, use_cache=True)
-    vecs = vecs.detach().cpu().numpy()
-    # L2 归一化（encoder 内部应已做；再保证一次）
-    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-    norms = np.clip(norms, 1e-12, None)
-    vecs = vecs / norms
-    return {raw: vecs[i] for i, raw in enumerate(raw_items)}
+    out: dict[str, np.ndarray] = {}
+    pbar = tqdm(total=len(raw_items), desc="RoBERTa encode", unit="item")
+    for start in range(0, len(texts), batch_size):
+        chunk_texts = texts[start : start + batch_size]
+        chunk_items = raw_items[start : start + batch_size]
+        vecs = encoder.encode_texts(
+            chunk_texts, batch_size=batch_size, use_cache=True, show_progress=False
+        )
+        vecs = vecs.detach().cpu().numpy()
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        norms = np.clip(norms, 1e-12, None)
+        vecs = vecs / norms
+        for i, raw in enumerate(chunk_items):
+            out[raw] = vecs[i]
+        pbar.update(len(chunk_texts))
+    pbar.close()
+    return out

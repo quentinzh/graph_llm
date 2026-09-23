@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from tqdm import tqdm
 
 
 @dataclass
@@ -59,10 +60,11 @@ class SequentialDatasetBundle:
         return len(users)
 
 
-def _read_jsonl(path: Path) -> list[dict]:
+def _read_jsonl(path: Path, desc: str | None = None) -> list[dict]:
     rows = []
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        line_iter = tqdm(f, desc=desc, unit="line") if desc else f
+        for line in line_iter:
             line = line.strip()
             if line:
                 rows.append(json.loads(line))
@@ -87,13 +89,13 @@ def load_sequential_dataset(data_dir: Path, dataset_name: str) -> SequentialData
     item2index = {str(k): int(v) for k, v in split_payload["item2index"].items()}
 
     item_meta: dict[str, dict[str, Any]] = {}
-    for row in _read_jsonl(root / "items.jsonl"):
+    for row in _read_jsonl(root / "items.jsonl", desc="items"):
         asin = str(row.get("asin") or row.get("item"))
         item_meta[asin] = row
 
     interactions: list[InteractionRecord] = []
     interaction_id = 0
-    for row in _read_jsonl(root / "reviews.jsonl"):
+    for row in _read_jsonl(root / "reviews.jsonl", desc="reviews"):
         raw_user = str(row["user"])
         raw_item = str(row["item"])
         if raw_item not in item2index:
@@ -119,7 +121,7 @@ def load_sequential_dataset(data_dir: Path, dataset_name: str) -> SequentialData
     # 若 reviews 未带 user_index，从 sequences 补全
     if any(r.user_index < 0 for r in interactions):
         user_map: dict[str, int] = {}
-        for row in _read_jsonl(root / "sequences.jsonl"):
+        for row in _read_jsonl(root / "sequences.jsonl", desc="sequences"):
             user_map[str(row["user"])] = int(row["user_index"])
         for rec in interactions:
             if rec.user_index < 0:

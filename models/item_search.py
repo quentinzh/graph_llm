@@ -89,6 +89,29 @@ def graph_search_top_k(
     return items, vals
 
 
+def graph_search_seed_items(
+    neighbor_index: ItemNeighborIndex,
+    history_items: list[int],
+    *,
+    fallback_item: int,
+    max_seeds: int = 8,
+) -> list[int]:
+    """用历史商品的图邻居作为搜索入口（历史商品本身常在 exclude 中）。"""
+    seeds: list[int] = []
+    seen: set[int] = set()
+    for h in history_items:
+        for nb in neighbor_index.neighbors_of(h):
+            if nb in seen:
+                continue
+            seen.add(nb)
+            seeds.append(nb)
+            if len(seeds) >= max_seeds:
+                return seeds
+    if not seeds:
+        seeds = [fallback_item]
+    return seeds
+
+
 def recovery_rate(exact_items: list[int], approx_items: list[int], k: int) -> float:
     es = set(exact_items[:k])
     ap = set(approx_items[:k])
