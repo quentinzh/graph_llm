@@ -1,12 +1,5 @@
-"""Profile-conditioned graph-guided Qwen explainer."""
+"""graph_llm：Semantic ID 图推荐。"""
 
-from graph_llm.models.model import GraphEvidenceCIER
-from graph_llm.models.selector import EvidenceSelector
-from graph_llm.models.token_graph import UserTokenGraph, build_sample_token_graph
+from graph_llm.models.sid_recommender import SIDRecommender
 
-__all__ = [
-    "GraphEvidenceCIER",
-    "UserTokenGraph",
-    "build_sample_token_graph",
-    "EvidenceSelector",
-]
+__all__ = ["SIDRecommender"]

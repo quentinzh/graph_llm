@@ -8,6 +8,18 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = PACKAGE_ROOT.parent
 
 
+SEQUENTIAL_MARKERS = (
+    "sequences.jsonl",
+    "reviews.jsonl",
+    "items.jsonl",
+    "split.json",
+)
+
+
+def is_sequential_dataset_dir(path: Path) -> bool:
+    return all((path / name).is_file() for name in SEQUENTIAL_MARKERS)
+
+
 def dataset_name_candidates(name: str) -> list[str]:
     """Return canonical dataset name candidates for a user-provided short name."""
     clean = str(name).strip().strip("/")
@@ -22,8 +34,8 @@ def dataset_name_candidates(name: str) -> list[str]:
 def resolve_dataset_paths(args) -> None:
     """Resolve args.dataset_name and args.data_dir from user input.
 
-    Searches args.data_dir (default graph_llm/data) then repo data/ for
-    reviews.pickle under each canonical name candidate.
+    Sequential PLEASER datasets: sequences/reviews/items/split.jsonl+json.
+    Legacy explain datasets: reviews.pickle under Amazon/... or flat names.
     """
     user_name = str(args.dataset_name).strip().strip("/")
     candidates = dataset_name_candidates(user_name)
@@ -39,21 +51,28 @@ def resolve_dataset_paths(args) -> None:
     tried = []
     for root in search_roots:
         for canonical in candidates:
-            reviews_path = root / canonical / "reviews.pickle"
+            seq_dir = root / canonical
+            tried.append(str(seq_dir))
+            if is_sequential_dataset_dir(seq_dir):
+                args.dataset_name = canonical
+                args.data_dir = str(root)
+                args.dataset_format = "sequential"
+                print(
+                    f"Resolved sequential dataset '{user_name}' -> "
+                    f"dataset_name={args.dataset_name!r}, data_dir={root}"
+                )
+                return
+            reviews_path = seq_dir / "reviews.pickle"
             tried.append(str(reviews_path))
             if reviews_path.is_file():
-                # Match graph2's verbatim cache naming. graph2 run.sh uses
-                # "Amazon/X/" (trailing slash -> Amazon__X__) for Amazon datasets,
-                # while flat names like "TripAdvisor_corsa_filtered" have no slash
-                # (-> TripAdvisor_corsa_filtered). Keep a trailing slash only when
-                # the canonical name contains a path separator.
                 if "/" in canonical:
                     args.dataset_name = canonical.rstrip("/") + "/"
                 else:
                     args.dataset_name = canonical
                 args.data_dir = str(root)
+                args.dataset_format = "legacy"
                 print(
-                    f"Resolved dataset '{user_name}' -> "
+                    f"Resolved legacy dataset '{user_name}' -> "
                     f"dataset_name={args.dataset_name!r}, data_dir={root}"
                 )
                 return

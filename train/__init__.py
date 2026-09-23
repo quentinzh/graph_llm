@@ -1,5 +1,5 @@
-"""Training and inference package for graph_llm."""
+"""Training package for graph_llm."""
 
-from graph_llm.train.trainer import run
+from graph_llm.train.recommend_trainer import run_recommend
 
-__all__ = ["run"]
+__all__ = ["run_recommend"]
