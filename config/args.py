@@ -173,7 +173,7 @@ def build_arg_parser():
     )
     parser.add_argument("--batch_size", default=8, type=int)
     parser.add_argument("--eval_batch_size", default=8, type=int)
-    parser.add_argument("--num_workers", default=1, type=int)
+    parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--seed", default=5254, type=int)
     parser.add_argument("--epochs", default=3, type=int)
     parser.add_argument("--learning_rate", default=1e-3, type=float)

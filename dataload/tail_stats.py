@@ -16,14 +16,25 @@ from graph_llm.aux.prompt_utils import useful_evidence_surface
 
 TAIL_STATS_VERSION = "tail_stats_v1"
 
+# 同一 token 在相同 ignored 集合下的内容词判定可安全复用。
+_IS_CONTENT_TOKEN_CACHE: dict[tuple[int, frozenset[int]], bool] = {}
+
 
 def is_content_token(tokenizer, token_id: int, ignored_token_ids: set[int]) -> bool:
     """Return whether a vocabulary token can serve as lexical evidence."""
     token_id = int(token_id)
+    ignored_key = frozenset(int(x) for x in ignored_token_ids)
+    cache_key = (token_id, ignored_key)
+    cached = _IS_CONTENT_TOKEN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     if token_id < 0 or token_id in ignored_token_ids:
+        _IS_CONTENT_TOKEN_CACHE[cache_key] = False
         return False
     surface = tokenizer.decode([token_id], skip_special_tokens=True).strip()
-    return bool(useful_evidence_surface(surface))
+    result = bool(useful_evidence_surface(surface))
+    _IS_CONTENT_TOKEN_CACHE[cache_key] = result
+    return result
 
 
 @dataclass(frozen=True)

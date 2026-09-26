@@ -47,19 +47,22 @@ class GraphDataset(Dataset):
     """Dataset wrapper with split metadata."""
 
     def __init__(self, dataframe, split_name: str):
-        self.df = dataframe.reset_index(drop=False).rename(columns={"index": "row_key"})
         self.split_name = split_name
+        df = dataframe.reset_index(drop=False).rename(columns={"index": "row_key"})
+        # 初始化时一次性物化行，避免 __getitem__ 反复走 pandas iloc。
+        self.rows: list[dict] = []
+        for local_idx, (_, row) in enumerate(df.iterrows()):
+            item = row.to_dict()
+            item["local_idx"] = local_idx
+            item["split_name"] = split_name
+            self.rows.append(item)
         self.features = dataframe["keyword_words"].tolist() if "keyword_words" in dataframe else []
 
     def __len__(self):
-        return len(self.df)
+        return len(self.rows)
 
     def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        item = row.to_dict()
-        item["local_idx"] = idx
-        item["split_name"] = self.split_name
-        return item
+        return self.rows[idx]
 
 
 class GraphCollater:
@@ -78,6 +81,7 @@ class GraphCollater:
         item_description_mode="keywords",
         graph_manager: GraphCacheManager | None = None,
         split_name: str = "train",
+        materialize_graph_batch: bool = False,
     ):
         self.max_step = max_step
         self.cur_step = 1
@@ -95,6 +99,38 @@ class GraphCollater:
         self.item_description_mode = item_description_mode
         self.graph_manager = graph_manager
         self.split_name = split_name
+        # True：在 collate 内直接 batch 图（兼容 SimDPO/单测）；False：只返回 local_idx，主进程取图。
+        self.materialize_graph_batch = bool(materialize_graph_batch)
+        self._keep_feature_token_cache: dict[int, bool] = {}
+        # local_idx -> 预计算的 profile/item/feature 字段
+        self._sample_cache: dict[int, dict] = {}
+
+    def bind_dataset_cache(self, dataset: GraphDataset) -> None:
+        """在折初始化时预计算 collate 热路径上的分词与 feature 权重。"""
+        profile_by_user: dict[str, list[int]] = {}
+        target_by_item: dict[str, list[int]] = {}
+        self._sample_cache = {}
+        for idx in range(len(dataset)):
+            row = dataset[idx]
+            raw_user = str(row["raw_user"]) if "raw_user" in row else str(row["user"])
+            raw_item = str(row["raw_item"]) if "raw_item" in row else str(row["item"])
+            if raw_user not in profile_by_user:
+                profile_by_user[raw_user] = self._profile_ids(row)
+            if raw_item not in target_by_item:
+                target_by_item[raw_item] = self._target_item_ids(row)
+            text_ids = list(row["text"][: self.word])
+            if len(text_ids) == 0:
+                text_ids = [self.eos_token_id]
+            feature_weights = self._feature_position_weights(
+                text_ids,
+                row.get("keyword_words", ""),
+            )
+            self._sample_cache[idx] = {
+                "text_ids": text_ids,
+                "feature_weights": feature_weights,
+                "profile_ids": profile_by_user[raw_user],
+                "target_item_ids": target_by_item[raw_item],
+            }
 
     def _graph_for_row(self, row) -> UserTokenGraph:
         if self.graph_manager is None:
@@ -124,17 +160,26 @@ class GraphCollater:
 
     def _keep_feature_token(self, token_id: int) -> bool:
         token_id = int(token_id)
+        cached = self._keep_feature_token_cache.get(token_id)
+        if cached is not None:
+            return cached
         if token_id < 0 or token_id in self.feature_ignored_token_ids:
+            self._keep_feature_token_cache[token_id] = False
             return False
         if self.tokenizer is None:
+            self._keep_feature_token_cache[token_id] = True
             return True
         surface = self.tokenizer.decode([token_id], skip_special_tokens=True).strip().lower()
         normalized = surface.strip(" \t\r\n.,!?;:'\"()[]{}")
         if not normalized or normalized in FEATURE_STOPWORDS:
+            self._keep_feature_token_cache[token_id] = False
             return False
         if normalized.isdigit() or len(normalized) <= 2:
+            self._keep_feature_token_cache[token_id] = False
             return False
-        return any(ch.isalpha() for ch in normalized)
+        result = any(ch.isalpha() for ch in normalized)
+        self._keep_feature_token_cache[token_id] = result
+        return result
 
     def _keyword_token_variants(self, keyword):
         if self.tokenizer is None or keyword is None:
@@ -194,6 +239,7 @@ class GraphCollater:
         profile_ids, target_item_ids = [], []
         feature_weight_rows = []
         graphs = []
+        local_idxs = []
         item_texts = []
         item_titles = []
         raw_users = []
@@ -204,18 +250,34 @@ class GraphCollater:
         ])
 
         for x in data:
-            ids = list(x["text"][:max_length])
+            local_idx = int(x["local_idx"])
+            cached = self._sample_cache.get(local_idx)
+            if cached is not None:
+                ids = list(cached["text_ids"][:max_length])
+                feature_weights = list(cached["feature_weights"][:max_length])
+                profile_row_ids = cached["profile_ids"]
+                target_row_ids = cached["target_item_ids"]
+            else:
+                ids = list(x["text"][:max_length])
+                feature_weights = self._feature_position_weights(
+                    ids,
+                    x.get("keyword_words", ""),
+                )
+                profile_row_ids = self._profile_ids(x)
+                target_row_ids = self._target_item_ids(x)
             if len(ids) == 0:
                 ids = [self.eos_token_id]
+                feature_weights = [0.0]
 
-            feature_weights = self._feature_position_weights(ids, x.get("keyword_words", ""))
             pad_len = max_length - len(ids)
             input_ids.append(ids + [self.pad_token_id] * pad_len)
             feature_weight_rows.append(feature_weights + [0.0] * pad_len)
-            profile_ids.append(self._profile_ids(x))
-            target_item_ids.append(self._target_item_ids(x))
+            profile_ids.append(profile_row_ids)
+            target_item_ids.append(target_row_ids)
             rating.append(x["rating"])
-            graphs.append(self._graph_for_row(x))
+            local_idxs.append(local_idx)
+            if self.materialize_graph_batch:
+                graphs.append(self._graph_for_row(x))
             raw_item = str(x["raw_item"]) if "raw_item" in x else str(x["item"])
             title, _description, item_text = item_meta_from_row(raw_item, self.item_meta)
             item_titles.append(title)
@@ -262,27 +324,42 @@ class GraphCollater:
         feature_position_weights = torch.tensor(feature_weight_rows, dtype=torch.float32)
         feature_position_mask = feature_position_weights > 0
 
-        batched_graph = batch_graphs(graphs)
-        graph_tensors = {
-            "node_token_ids": torch.tensor(batched_graph["node_token_ids"], dtype=torch.long),
-            "node_counts": torch.tensor(batched_graph["node_counts"], dtype=torch.float32),
-            "node_doc_freq": torch.tensor(batched_graph["node_doc_freq"], dtype=torch.float32),
-            "node_in_degree": torch.tensor(batched_graph["node_in_degree"], dtype=torch.float32),
-            "node_out_degree": torch.tensor(batched_graph["node_out_degree"], dtype=torch.float32),
-            "edge_index": torch.tensor(batched_graph["edge_index"], dtype=torch.long),
-            "batch_index": torch.tensor(batched_graph["batch_index"], dtype=torch.long),
-            "num_nodes_per_graph": torch.tensor(batched_graph["num_nodes_per_graph"], dtype=torch.long),
-        }
-
-        return (
+        common_tail = (
             torch.tensor(input_ids, dtype=torch.long),
             torch.tensor(rating, dtype=torch.long),
             profile_tensor,
             profile_mask,
             target_item_tensor,
             target_item_mask,
-            graph_tensors,
-            graphs,
+        )
+        if self.materialize_graph_batch:
+            batched_graph = batch_graphs(graphs)
+            graph_tensors = {
+                "node_token_ids": torch.tensor(batched_graph["node_token_ids"], dtype=torch.long),
+                "node_counts": torch.tensor(batched_graph["node_counts"], dtype=torch.float32),
+                "node_doc_freq": torch.tensor(batched_graph["node_doc_freq"], dtype=torch.float32),
+                "node_in_degree": torch.tensor(batched_graph["node_in_degree"], dtype=torch.float32),
+                "node_out_degree": torch.tensor(batched_graph["node_out_degree"], dtype=torch.float32),
+                "edge_index": torch.tensor(batched_graph["edge_index"], dtype=torch.long),
+                "batch_index": torch.tensor(batched_graph["batch_index"], dtype=torch.long),
+                "num_nodes_per_graph": torch.tensor(
+                    batched_graph["num_nodes_per_graph"], dtype=torch.long
+                ),
+            }
+            return (
+                *common_tail,
+                graph_tensors,
+                graphs,
+                item_texts,
+                item_titles,
+                raw_users,
+                feature_position_mask,
+                feature_position_weights,
+                review_contexts,
+            )
+        return (
+            *common_tail,
+            local_idxs,
             item_texts,
             item_titles,
             raw_users,
@@ -292,8 +369,38 @@ class GraphCollater:
         )
 
 
-def compute_profile_lengths(dataset, profile_records, tokenizer, max_profile_tokens):
+def resolve_batch_graphs(graph_manager, split_name: str, local_idxs: list[int]):
+    """主进程按 local_idx 取图并 batch，避免 worker 进程 pickle 图对象。"""
+    graphs = [graph_manager.get_graph(split_name, int(idx)) for idx in local_idxs]
+    batched_graph = batch_graphs(graphs)
+    graph_tensors = {
+        "node_token_ids": torch.tensor(batched_graph["node_token_ids"], dtype=torch.long),
+        "node_counts": torch.tensor(batched_graph["node_counts"], dtype=torch.float32),
+        "node_doc_freq": torch.tensor(batched_graph["node_doc_freq"], dtype=torch.float32),
+        "node_in_degree": torch.tensor(batched_graph["node_in_degree"], dtype=torch.float32),
+        "node_out_degree": torch.tensor(batched_graph["node_out_degree"], dtype=torch.float32),
+        "edge_index": torch.tensor(batched_graph["edge_index"], dtype=torch.long),
+        "batch_index": torch.tensor(batched_graph["batch_index"], dtype=torch.long),
+        "num_nodes_per_graph": torch.tensor(
+            batched_graph["num_nodes_per_graph"], dtype=torch.long
+        ),
+    }
+    return graphs, graph_tensors
+
+
+def compute_profile_lengths(
+    dataset,
+    profile_records,
+    tokenizer,
+    max_profile_tokens,
+    collater: GraphCollater | None = None,
+):
     """Return per-sample profile token lengths for length-bucket sampling."""
+    if collater is not None and collater._sample_cache:
+        return [
+            len(collater._sample_cache[idx]["profile_ids"])
+            for idx in range(len(dataset))
+        ]
     lengths = []
     for idx in range(len(dataset)):
         row = dataset[idx]
@@ -311,6 +418,7 @@ __all__ = [
     "MyDataset",
     "assert_profile_coverage",
     "compute_profile_lengths",
+    "resolve_batch_graphs",
     "dataset_split",
     "load_profile_cache",
     "read_split_indices",

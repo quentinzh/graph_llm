@@ -27,7 +27,11 @@ REPO_ROOT = PACKAGE_ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from graph_llm.aux.prompt_utils import build_generation_prompt_batch
+from graph_llm.aux.prompt_utils import (
+    build_generation_prompt_batch,
+    build_generation_prompt_text,
+    clean_ws,
+)
 from graph_llm.config.args import _is_local_model_dir
 from graph_llm.config import (
     dataset_cache_path,
@@ -49,10 +53,12 @@ from graph_llm.dataload.dataloader import (
     dataset_split,
     load_profile_cache,
     read_split_indices,
+    resolve_batch_graphs,
     tokenizer_eos_id,
     tokenizer_pad_id,
     tokenizer_special_ids,
 )
+from graph_llm.dataload.fold_runtime import FoldRuntimeCache, build_fold_runtime_cache
 from graph_llm.dataload.embeddings import QwenEmbeddingEncoder
 from graph_llm.dataload.review_memory import ReviewMemoryBank, mark_review_history
 from graph_llm.dataload.sampler import LengthBucketSampler
@@ -630,38 +636,65 @@ def apply_force(args, split_indices):
     print("--force: artifact cleanup complete; starting fresh training run.")
 
 
-def unpack_batch(batch, device):
-    (
-        input_ids,
-        rating,
-        profile_ids,
-        profile_mask,
-        target_item_ids,
-        target_item_mask,
-        graph_tensors,
-        graphs,
-        item_texts,
-        item_titles,
-        raw_users,
-        feature_position_mask,
-        feature_position_weights,
-        review_contexts,
-    ) = batch
-    graph_tensors = {k: v.to(device) for k, v in graph_tensors.items()}
+# 生成 prompt 在折内按 (title, user, max_tokens) 缓存，避免每步重复分词。
+_GENERATION_PROMPT_TOKEN_CACHE: dict[tuple[str, str, int], list[int]] = {}
+
+
+def unpack_batch(batch, device, graph_manager=None, split_name=None):
+    if len(batch) == 14:
+        (
+            input_ids,
+            rating,
+            profile_ids,
+            profile_mask,
+            target_item_ids,
+            target_item_mask,
+            graph_tensors,
+            graphs,
+            item_texts,
+            item_titles,
+            raw_users,
+            feature_position_mask,
+            feature_position_weights,
+            review_contexts,
+        ) = batch
+        graph_tensors = {k: v.to(device, non_blocking=True) for k, v in graph_tensors.items()}
+    elif len(batch) == 13:
+        (
+            input_ids,
+            rating,
+            profile_ids,
+            profile_mask,
+            target_item_ids,
+            target_item_mask,
+            local_idxs,
+            item_texts,
+            item_titles,
+            raw_users,
+            feature_position_mask,
+            feature_position_weights,
+            review_contexts,
+        ) = batch
+        if graph_manager is None or split_name is None:
+            raise ValueError("lite collate batches require graph_manager and split_name")
+        graphs, graph_tensors = resolve_batch_graphs(graph_manager, split_name, local_idxs)
+        graph_tensors = {k: v.to(device, non_blocking=True) for k, v in graph_tensors.items()}
+    else:
+        raise ValueError(f"Unexpected collate batch length: {len(batch)}")
     return (
-        input_ids.to(device),
-        rating.to(device),
-        profile_ids.to(device),
-        profile_mask.to(device),
-        target_item_ids.to(device),
-        target_item_mask.to(device),
+        input_ids.to(device, non_blocking=True),
+        rating.to(device, non_blocking=True),
+        profile_ids.to(device, non_blocking=True),
+        profile_mask.to(device, non_blocking=True),
+        target_item_ids.to(device, non_blocking=True),
+        target_item_mask.to(device, non_blocking=True),
         graph_tensors,
         graphs,
         item_texts,
         item_titles,
         raw_users,
-        feature_position_mask.to(device),
-        feature_position_weights.to(device),
+        feature_position_mask.to(device, non_blocking=True),
+        feature_position_weights.to(device, non_blocking=True),
         review_contexts,
     )
 
@@ -674,13 +707,36 @@ def build_batch_prompt_tensors(
     device,
 ):
     pad_id = tokenizer_pad_id(tokenizer)
-    generation_prompt_ids, generation_prompt_mask = build_generation_prompt_batch(
-        item_titles,
-        raw_users,
-        tokenizer,
-        pad_id,
-        max_tokens=args.max_generation_prompt_tokens,
-    )
+    max_tokens = int(args.max_generation_prompt_tokens)
+    encoded_prompts: list[list[int]] = []
+    for title, user_id in zip(item_titles, raw_users):
+        cache_key = (clean_ws(title) or "this item", clean_ws(user_id) or "this user", max_tokens)
+        cached_ids = _GENERATION_PROMPT_TOKEN_CACHE.get(cache_key)
+        if cached_ids is None:
+            prompt_text = build_generation_prompt_text(title, user_id)
+            cached_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+            if max_tokens > 0 and len(cached_ids) > max_tokens:
+                cached_ids = cached_ids[:max_tokens]
+            _GENERATION_PROMPT_TOKEN_CACHE[cache_key] = cached_ids
+        encoded_prompts.append(cached_ids)
+    if not encoded_prompts:
+        generation_prompt_ids, generation_prompt_mask = build_generation_prompt_batch(
+            item_titles,
+            raw_users,
+            tokenizer,
+            pad_id,
+            max_tokens=max_tokens,
+        )
+    else:
+        max_len = max(len(ids) for ids in encoded_prompts)
+        batch = len(encoded_prompts)
+        generation_prompt_ids = torch.full((batch, max_len), pad_id, dtype=torch.long)
+        generation_prompt_mask = torch.zeros((batch, max_len), dtype=torch.long)
+        for idx, ids in enumerate(encoded_prompts):
+            if not ids:
+                continue
+            generation_prompt_ids[idx, : len(ids)] = torch.tensor(ids, dtype=torch.long)
+            generation_prompt_mask[idx, : len(ids)] = 1
     return (
         generation_prompt_ids.to(device),
         generation_prompt_mask.to(device),
@@ -702,6 +758,8 @@ def compute_batch_selector_tensors(
     tail_stats: TailTokenStats | None = None,
     compute_selector_loss: bool = False,
     item_embs=None,
+    fold_cache: FoldRuntimeCache | None = None,
+    review_contexts=None,
 ):
     node_token_ids = graph_tensors["node_token_ids"]
     if node_token_ids.numel() == 0:
@@ -710,22 +768,36 @@ def compute_batch_selector_tensors(
         empty_mask = torch.empty((batch_size, 0), dtype=torch.bool, device=device)
         return empty_long, empty_mask, torch.zeros((), dtype=torch.float32, device=device)
 
-    unique_ids = sorted(set(node_token_ids.detach().cpu().tolist()))
-    decode_fn = lambda tid: tokenizer.decode([int(tid)], skip_special_tokens=True)
-    unique_emb = embedding_encoder.encode_token_ids(unique_ids, decode_fn)
-    if unique_emb.device != device:
-        unique_emb = unique_emb.to(device)
+    unique_ids = torch.unique(node_token_ids)
+    unique_ids_list = [int(t) for t in unique_ids.detach().cpu().tolist()]
+    if fold_cache is not None and fold_cache.node_emb_by_token_id:
+        unique_emb = torch.stack(
+            [fold_cache.node_emb_by_token_id[token_id] for token_id in unique_ids_list],
+            dim=0,
+        ).to(device)
+    else:
+        decode_fn = lambda tid: tokenizer.decode([int(tid)], skip_special_tokens=True)
+        unique_emb = embedding_encoder.encode_token_ids(unique_ids_list, decode_fn)
+        if unique_emb.device != device:
+            unique_emb = unique_emb.to(device)
 
     if item_embs is None:
-        item_embs = embedding_encoder.encode_texts(item_texts)
+        if fold_cache is not None and fold_cache.item_emb_by_text:
+            item_embs = torch.stack(
+                [fold_cache.item_emb_by_text[text] for text in item_texts],
+                dim=0,
+            ).to(device)
+        else:
+            item_embs = embedding_encoder.encode_texts(item_texts)
     if item_embs.device != device:
         item_embs = item_embs.to(device)
-    id_to_idx = {tid: idx for idx, tid in enumerate(unique_ids)}
+    id_to_idx = {tid: idx for idx, tid in enumerate(unique_ids_list)}
+    flat_node_ids = node_token_ids.reshape(-1)
     node_indices = torch.tensor(
-        [id_to_idx[int(t)] for t in node_token_ids.detach().cpu().tolist()],
+        [id_to_idx[int(t)] for t in flat_node_ids.detach().cpu().tolist()],
         device=device,
         dtype=torch.long,
-    )
+    ).view_as(node_token_ids)
     node_token_emb = unique_emb[node_indices]
     evidence_token_ids, evidence_token_mask, utility_scores = (
         build_selector_outputs(
@@ -738,8 +810,8 @@ def compute_batch_selector_tensors(
     )
     selector_loss = torch.zeros((), dtype=torch.float32, device=device)
     if compute_selector_loss:
-        if input_ids is None or tail_stats is None:
-            raise ValueError("selector supervision requires input_ids and tail_stats")
+        if tail_stats is None:
+            raise ValueError("selector supervision requires tail_stats")
         ignored = set(parse_special_token_ids(args.special_token_ids, tokenizer))
         ignored.add(tokenizer_pad_id(tokenizer))
         ignored.update(tokenizer_eos_ids(tokenizer))
@@ -747,23 +819,33 @@ def compute_batch_selector_tensors(
         for batch_idx, graph in enumerate(graphs):
             if graph.num_nodes == 0:
                 continue
-            target_ids = {
-                int(token_id)
-                for token_id in input_ids[batch_idx].detach().cpu().tolist()
-                if is_content_token(tokenizer, int(token_id), ignored)
-            }
-            core_feature_ids = set()
-            if feature_position_weights is not None:
-                # 仅权重为 2.0 的位置是核心 feature；0.2/0.1 的邻近词不参与此加权。
-                core_feature_ids = {
+            if fold_cache is not None and review_contexts is not None:
+                context = review_contexts[batch_idx]
+                label_key = (str(context["split_name"]), int(context["local_idx"]))
+                label_pair = fold_cache.selector_labels_by_sample.get(label_key)
+                if label_pair is None:
+                    continue
+                target_ids = set(label_pair[0])
+                core_feature_ids = set(label_pair[1])
+            else:
+                if input_ids is None:
+                    raise ValueError("selector supervision requires input_ids without fold_cache")
+                target_ids = {
                     int(token_id)
-                    for token_id, position_weight in zip(
-                        input_ids[batch_idx].detach().cpu().tolist(),
-                        feature_position_weights[batch_idx].detach().cpu().tolist(),
-                    )
-                    if float(position_weight) >= FEATURE_CORE_WEIGHT
-                    and is_content_token(tokenizer, int(token_id), ignored)
+                    for token_id in input_ids[batch_idx].detach().cpu().tolist()
+                    if is_content_token(tokenizer, int(token_id), ignored)
                 }
+                core_feature_ids = set()
+                if feature_position_weights is not None:
+                    core_feature_ids = {
+                        int(token_id)
+                        for token_id, position_weight in zip(
+                            input_ids[batch_idx].detach().cpu().tolist(),
+                            feature_position_weights[batch_idx].detach().cpu().tolist(),
+                        )
+                        if float(position_weight) >= FEATURE_CORE_WEIGHT
+                        and is_content_token(tokenizer, int(token_id), ignored)
+                    }
             loss = model.evidence_selector.sampled_bce_loss(
                 utility_scores[batch_idx],
                 graph,
@@ -791,13 +873,25 @@ def prepare_batch_review_tensors(
     item_texts,
     review_contexts,
     device,
+    fold_cache: FoldRuntimeCache | None = None,
 ):
     """只编码一次当前物品，并同时供 selector 与评论 Top-K 检索复用。"""
-    item_embs = embedding_encoder.encode_texts(item_texts)
-    if item_embs.device != device:
-        item_embs = item_embs.to(device)
+    if fold_cache is not None and fold_cache.item_emb_by_text:
+        item_embs = torch.stack(
+            [fold_cache.item_emb_by_text[text] for text in item_texts],
+            dim=0,
+        ).to(device)
+    else:
+        item_embs = embedding_encoder.encode_texts(item_texts)
+        if item_embs.device != device:
+            item_embs = item_embs.to(device)
     review_tensors = (
-        review_memory.prepare_batch(review_contexts, item_embs, device)
+        review_memory.prepare_batch(
+            review_contexts,
+            item_embs,
+            device,
+            pick_cache=fold_cache.review_pick_by_sample if fold_cache is not None else None,
+        )
         if review_memory is not None
         else {}
     )
@@ -863,6 +957,9 @@ def train_epoch(
     tail_stats,
     tail_weight_table,
     review_memory,
+    graph_manager,
+    split_name,
+    fold_cache=None,
 ):
     model.train()
     loss_log, nll_log, selector_log, feat_log, prefix_feat_log = [], [], [], [], []
@@ -889,7 +986,7 @@ def train_epoch(
             feature_position_mask,
             feature_position_weights,
             review_contexts,
-        ) = unpack_batch(batch, device)
+        ) = unpack_batch(batch, device, graph_manager, split_name)
 
         item_embs, review_tensors = prepare_batch_review_tensors(
             review_memory,
@@ -897,6 +994,7 @@ def train_epoch(
             item_texts,
             review_contexts,
             device,
+            fold_cache=fold_cache,
         )
         evidence_token_ids, evidence_token_mask, selector_loss = (
             compute_batch_selector_tensors(
@@ -913,6 +1011,8 @@ def train_epoch(
                 tail_stats=tail_stats,
                 compute_selector_loss=True,
                 item_embs=item_embs,
+                fold_cache=fold_cache,
+                review_contexts=review_contexts,
             )
         )
         generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
@@ -941,11 +1041,11 @@ def train_epoch(
                     **review_tensors,
                 )
                 loss = base_loss + float(args.lambda_selector) * selector_loss
-            loss_log.append(loss.item())
-            nll_log.append(nll_loss.item())
-            selector_log.append(selector_loss.detach().item())
-            feat_log.append(feat_loss.item())
-            prefix_feat_log.append(prefix_feat_loss.item())
+            loss_log.append(loss.detach())
+            nll_log.append(nll_loss.detach())
+            selector_log.append(selector_loss.detach())
+            feat_log.append(feat_loss.detach())
+            prefix_feat_log.append(prefix_feat_loss.detach())
             scaler.scale(loss / args.accumulation_steps).backward()
         except torch.cuda.OutOfMemoryError:
             msg = (
@@ -967,9 +1067,11 @@ def train_epoch(
         if (batch_idx + 1) % args.show_train_loss_steps == 0:
             msg = (
                 f"Train Epoch: {epoch} "
-                f"Loss: {np.mean(loss_log):.6f}\tTailSFT: {np.mean(nll_log):.6f}\t"
-                f"Selector: {np.mean(selector_log):.6f}\tFeat: {np.mean(feat_log):.6f}\t"
-                f"PrefixFeat: {np.mean(prefix_feat_log):.6f}\t"
+                f"Loss: {torch.stack(loss_log).mean().item():.6f}\t"
+                f"TailSFT: {torch.stack(nll_log).mean().item():.6f}\t"
+                f"Selector: {torch.stack(selector_log).mean().item():.6f}\t"
+                f"Feat: {torch.stack(feat_log).mean().item():.6f}\t"
+                f"PrefixFeat: {torch.stack(prefix_feat_log).mean().item():.6f}\t"
                 f"{cuda_memory_status(cuda_devices)}"
             )
             print(msg)
@@ -1002,6 +1104,9 @@ def valid_step(
     tail_weight_table,
     review_memory,
     epoch=0,
+    graph_manager=None,
+    split_name=None,
+    fold_cache=None,
 ):
     model.eval()
     loss_log = []
@@ -1022,13 +1127,14 @@ def valid_step(
                 feature_position_mask,
                 feature_position_weights,
                 review_contexts,
-            ) = unpack_batch(batch, device)
+            ) = unpack_batch(batch, device, graph_manager, split_name)
             item_embs, review_tensors = prepare_batch_review_tensors(
                 review_memory,
                 embedding_encoder,
                 item_texts,
                 review_contexts,
                 device,
+                fold_cache=fold_cache,
             )
             evidence_token_ids, evidence_token_mask, selector_loss = (
                 compute_batch_selector_tensors(
@@ -1045,6 +1151,8 @@ def valid_step(
                     tail_stats=tail_stats,
                     compute_selector_loss=True,
                     item_embs=item_embs,
+                    fold_cache=fold_cache,
+                    review_contexts=review_contexts,
                 )
             )
             generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
@@ -1108,7 +1216,8 @@ def get_tail_demand_eval_groups(test_dataset, tokenizer, args):
             ids_clear(ids, pad_token_id=pad_id, eos_token_ids=eos_ids, skip_token_ids=skip_ids),
             tokenizer,
         )
-        for ids in test_dataset.df["text"].tolist()
+        for row in test_dataset.rows
+        for ids in [row["text"]]
     ]
     demands = compute_tail_demand_from_tokens(reference_tokens)
     labels = assign_tail_demand_groups(
@@ -1258,11 +1367,14 @@ def test_step(
     tokenizer,
     args,
     review_memory,
+    graph_manager=None,
+    split_name=None,
+    fold_cache=None,
 ):
     model.eval()
     predict, label = [], []
     max_batches = int(getattr(args, "max_eval_batches", 0) or 0)
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Test generate")):
             (
                 input_ids,
@@ -1279,13 +1391,14 @@ def test_step(
                 _feature_position_mask,
                 _feature_position_weights,
                 review_contexts,
-            ) = unpack_batch(batch, device)
+            ) = unpack_batch(batch, device, graph_manager, split_name)
             item_embs, review_tensors = prepare_batch_review_tensors(
                 review_memory,
                 embedding_encoder,
                 item_texts,
                 review_contexts,
                 device,
+                fold_cache=fold_cache,
             )
             evidence_token_ids, evidence_token_mask, _ = compute_batch_selector_tensors(
                 model,
@@ -1297,6 +1410,8 @@ def test_step(
                 args,
                 device,
                 item_embs=item_embs,
+                fold_cache=fold_cache,
+                review_contexts=review_contexts,
             )
             generation_prompt_ids, generation_prompt_mask = build_batch_prompt_tensors(
                 item_titles,
@@ -1539,8 +1654,8 @@ def _run_split(
         item_meta=item_meta,
         max_target_item_tokens=args.max_target_item_tokens,
         item_description_mode=args.item_description_mode,
-        graph_manager=graph_train,
         split_name="train",
+        materialize_graph_batch=False,
     )
     collate_valid = GraphCollater(
         max_step=1,
@@ -1551,8 +1666,8 @@ def _run_split(
         item_meta=item_meta,
         max_target_item_tokens=args.max_target_item_tokens,
         item_description_mode=args.item_description_mode,
-        graph_manager=graph_valid,
         split_name="validation",
+        materialize_graph_batch=False,
     )
     collate_test = GraphCollater(
         max_step=1,
@@ -1563,9 +1678,12 @@ def _run_split(
         item_meta=item_meta,
         max_target_item_tokens=args.max_target_item_tokens,
         item_description_mode=args.item_description_mode,
-        graph_manager=graph_test,
         split_name="test",
+        materialize_graph_batch=False,
     )
+    collate_train.bind_dataset_cache(train_set)
+    collate_valid.bind_dataset_cache(valid_set)
+    collate_test.bind_dataset_cache(test_set)
 
     eval_batch_size = args.eval_batch_size or args.batch_size
     print(
@@ -1577,6 +1695,7 @@ def _run_split(
         train_profiles,
         tokenizer,
         args.max_profile_tokens,
+        collater=collate_train,
     )
     train_sampler = LengthBucketSampler(
         profile_lengths,
@@ -1584,17 +1703,33 @@ def _run_split(
         shuffle=True,
         seed=args.seed,
     )
+    loader_kwargs = {
+        "pin_memory": True,
+        "num_workers": args.num_workers,
+    }
+    if args.num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 2
     train_loader = DataLoader(
-        train_set, batch_size=args.batch_size, collate_fn=collate_train,
-        sampler=train_sampler, pin_memory=True, num_workers=args.num_workers,
+        train_set,
+        batch_size=args.batch_size,
+        collate_fn=collate_train,
+        sampler=train_sampler,
+        **loader_kwargs,
     )
     valid_loader = DataLoader(
-        valid_set, batch_size=eval_batch_size, collate_fn=collate_valid,
-        shuffle=False, pin_memory=True, num_workers=args.num_workers,
+        valid_set,
+        batch_size=eval_batch_size,
+        collate_fn=collate_valid,
+        shuffle=False,
+        **loader_kwargs,
     )
     test_loader = DataLoader(
-        test_set, batch_size=eval_batch_size, collate_fn=collate_test,
-        shuffle=False, pin_memory=True, num_workers=args.num_workers,
+        test_set,
+        batch_size=eval_batch_size,
+        collate_fn=collate_test,
+        shuffle=False,
+        **loader_kwargs,
     )
 
     lora_config = LoraConfig(
@@ -1723,6 +1858,48 @@ def _run_split(
         dtype=torch.float32,
         device=device,
     )
+    ignored_for_selector = set(parse_special_token_ids(args.special_token_ids, tokenizer))
+    ignored_for_selector.add(tokenizer_pad_id(tokenizer))
+    ignored_for_selector.update(tokenizer_eos_ids(tokenizer))
+    print("Building fold runtime cache (frozen embeddings, review picks, selector labels)...")
+    fold_cache = build_fold_runtime_cache(
+        embedding_encoder=embedding_encoder,
+        tokenizer=tokenizer,
+        item_meta=item_meta,
+        graph_managers={
+            "train": graph_train,
+            "validation": graph_valid,
+            "test": graph_test,
+        },
+        datasets={
+            "train": train_set,
+            "validation": valid_set,
+            "test": test_set,
+        },
+        split_names={
+            "train": "train",
+            "validation": "validation",
+            "test": "test",
+        },
+        collaters={
+            "train": collate_train,
+            "validation": collate_valid,
+            "test": collate_test,
+        },
+        review_memories={
+            "train": review_train_memory,
+            "validation": review_train_memory,
+            "test": review_test_memory,
+        },
+        ignored_token_ids=ignored_for_selector,
+    )
+    print(
+        "Fold runtime cache ready: "
+        f"node_tokens={len(fold_cache.node_emb_by_token_id)} "
+        f"items={len(fold_cache.item_emb_by_text)} "
+        f"review_picks={len(fold_cache.review_pick_by_sample)} "
+        f"selector_labels={len(fold_cache.selector_labels_by_sample)}"
+    )
 
     optimizer_groups = [
         {
@@ -1834,24 +2011,25 @@ def _run_split(
             if hasattr(train_loader.sampler, "set_epoch"):
                 train_loader.sampler.set_epoch(epoch)
             train_epoch(
-                model, embedding_encoder, train_loader, optimizer, device,
-                cuda_devices, epoch, args, scaler, log_name, tokenizer,
-                tail_stats, tail_weight_table, review_train_memory,
-            )
-            collate_train.cur_step = len(train_loader) * (epoch + 1)
-            valid_loss = valid_step(
                 model,
                 embedding_encoder,
-                valid_loader,
+                train_loader,
+                optimizer,
                 device,
-                log_name,
+                cuda_devices,
+                epoch,
                 args,
+                scaler,
+                log_name,
                 tokenizer,
                 tail_stats,
                 tail_weight_table,
                 review_train_memory,
-                epoch=epoch,
+                graph_train,
+                "train",
+                fold_cache=fold_cache,
             )
+            collate_train.cur_step = len(train_loader) * (epoch + 1)
             validation_generation_path = str(
                 output_dir / f"{split_index}valid_epoch{epoch}.dataset"
             )
@@ -1867,6 +2045,9 @@ def _run_split(
                 tokenizer,
                 args,
                 review_train_memory,
+                graph_manager=graph_valid,
+                split_name="validation",
+                fold_cache=fold_cache,
             )
             valid_fmr = float(valid_metrics.get("FMR", 0.0))
             with open(log_name, "a+", encoding="utf-8") as f:
@@ -1903,8 +2084,20 @@ def _run_split(
     if args.gradient_checkpointing and hasattr(model.model, "gradient_checkpointing_disable"):
         model.model.gradient_checkpointing_disable()
     test_metrics = test_step(
-        model, embedding_encoder, test_loader, device, log_name,
-        test_set, generation_path, args.word, tokenizer, args, review_test_memory,
+        model,
+        embedding_encoder,
+        test_loader,
+        device,
+        log_name,
+        test_set,
+        generation_path,
+        args.word,
+        tokenizer,
+        args,
+        review_test_memory,
+        graph_manager=graph_test,
+        split_name="test",
+        fold_cache=fold_cache,
     )
     torch.cuda.empty_cache()
     return test_metrics

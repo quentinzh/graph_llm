@@ -181,6 +181,20 @@ def strip_leading_special(ids, tokenizer=None):
     return ids
 
 
+# 关键词抽取会对同一 token id 反复 decode，这里做进程级缓存。
+_KEYWORD_TOKEN_SURFACE_CACHE: dict[int, str] = {}
+
+
+def _decode_keyword_token_surface(tokenizer, token_id: int) -> str:
+    token_id = int(token_id)
+    cached = _KEYWORD_TOKEN_SURFACE_CACHE.get(token_id)
+    if cached is not None:
+        return cached
+    surface = tokenizer.decode([token_id], skip_special_tokens=True).strip()
+    _KEYWORD_TOKEN_SURFACE_CACHE[token_id] = surface
+    return surface
+
+
 def _extract_description_keywords(tokenizer, description: str) -> str:
     """Extract keywords from description text, deduplicate, join with commas."""
     if not description or description == "Unknown":
@@ -190,7 +204,7 @@ def _extract_description_keywords(tokenizer, description: str) -> str:
     keywords = []
     seen = set()
     for tid in ids:
-        surface = tokenizer.decode([tid], skip_special_tokens=True).strip()
+        surface = _decode_keyword_token_surface(tokenizer, tid)
         filtered = useful_evidence_surface(surface)
         if filtered and filtered.lower() not in seen:
             seen.add(filtered.lower())

@@ -14,6 +14,67 @@ from graph_llm.models.token_graph import (
 )
 from graph_llm.dataload.tail_stats import TailTokenStats
 
+# MagNet 归一化邻接按图对象 id 缓存到 CPU，避免每步 GPU→CPU 同步。
+_GRAPH_MAGNET_CPU: dict[tuple[int, float], tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def get_graph_device_tensors(graph: UserTokenGraph, device: torch.device) -> dict:
+    """每个图在每个 device 上只转换一次边与频率张量。"""
+    cache = graph.__dict__.setdefault("_device_tensors", {})
+    key = str(device)
+    if key not in cache:
+        edge_weight = None
+        if graph.edge_weight.size > 0:
+            edge_weight = torch.tensor(
+                graph.edge_weight,
+                device=device,
+                dtype=torch.float32,
+            )
+        cache[key] = {
+            "counts": torch.tensor(graph.node_counts, device=device, dtype=torch.float32),
+            "doc_freq": torch.tensor(graph.node_doc_freq, device=device, dtype=torch.float32),
+            "edge_index": torch.tensor(graph.edge_index, device=device, dtype=torch.long),
+            "edge_weight": edge_weight,
+        }
+    return cache[key]
+
+
+def get_magnet_norms_for_graph(
+    graph: UserTokenGraph,
+    q: float,
+    device: torch.device,
+    dtype: torch.dtype,
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cache_key = (id(graph), float(q))
+    cached = _GRAPH_MAGNET_CPU.get(cache_key)
+    if cached is None:
+        num_nodes = graph.num_nodes
+        h_real, h_imag, inv_sqrt_deg = _build_magnetic_adjacency(
+            num_nodes,
+            edge_index,
+            edge_weight,
+            q=q,
+            device=device,
+            dtype=dtype,
+        )
+        if num_nodes == 0:
+            empty = torch.empty((0, 0), device=device, dtype=dtype)
+            _GRAPH_MAGNET_CPU[cache_key] = (empty.cpu(), empty.cpu())
+        else:
+            scale = inv_sqrt_deg.unsqueeze(1) * inv_sqrt_deg.unsqueeze(0)
+            _GRAPH_MAGNET_CPU[cache_key] = (
+                (h_real * scale).detach().cpu(),
+                (h_imag * scale).detach().cpu(),
+            )
+        cached = _GRAPH_MAGNET_CPU[cache_key]
+    h_real_norm, h_imag_norm = cached
+    return (
+        h_real_norm.to(device=device, dtype=dtype),
+        h_imag_norm.to(device=device, dtype=dtype),
+    )
+
 
 def _complex_relu(real: torch.Tensor, imag: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """MagNet complex ReLU：仅保留幅角落在 [-pi/2, pi/2) 的复数分量。"""
@@ -80,27 +141,36 @@ class MagNetConv(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_weight: torch.Tensor | None = None,
+        graph: UserTokenGraph | None = None,
     ) -> torch.Tensor:
         if x.numel() == 0:
             return x
 
-        num_nodes = x.shape[0]
         device, dtype = x.device, x.dtype
-        h_real, h_imag, inv_sqrt_deg = _build_magnetic_adjacency(
-            num_nodes,
-            edge_index,
-            edge_weight,
-            q=self.q,
-            device=device,
-            dtype=dtype,
-        )
-        if h_real.numel() == 0:
+        if graph is not None:
+            h_real_norm, h_imag_norm = get_magnet_norms_for_graph(
+                graph,
+                self.q,
+                device,
+                dtype,
+                edge_index,
+                edge_weight,
+            )
+        else:
+            num_nodes = x.shape[0]
+            h_real, h_imag, inv_sqrt_deg = _build_magnetic_adjacency(
+                num_nodes,
+                edge_index,
+                edge_weight,
+                q=self.q,
+                device=device,
+                dtype=dtype,
+            )
+            scale = inv_sqrt_deg.unsqueeze(1) * inv_sqrt_deg.unsqueeze(0)
+            h_real_norm = h_real * scale
+            h_imag_norm = h_imag * scale
+        if h_real_norm.numel() == 0:
             return self.unwind(torch.cat([x, torch.zeros_like(x)], dim=-1))
-
-        # D^{-1/2} H D^{-1/2}，对稀疏小图直接做稠密乘法即可。
-        scale = inv_sqrt_deg.unsqueeze(1) * inv_sqrt_deg.unsqueeze(0)
-        h_real_norm = h_real * scale
-        h_imag_norm = h_imag * scale
 
         out_real = h_real_norm @ x
         out_imag = h_imag_norm @ x
@@ -148,10 +218,11 @@ class EvidenceSelector(nn.Module):
         node_token_emb: torch.Tensor,
         edge_index: torch.Tensor,
         edge_weight: torch.Tensor | None = None,
+        graph: UserTokenGraph | None = None,
     ) -> torch.Tensor:
         x = self.input_proj(node_token_emb)
         for conv in self.convs:
-            x = conv(x, edge_index, edge_weight)
+            x = conv(x, edge_index, edge_weight, graph=graph)
         return x
 
     def forward_single(
@@ -164,17 +235,17 @@ class EvidenceSelector(nn.Module):
             return torch.empty((0,), device=item_emb.device)
 
         device = item_emb.device
-        counts = torch.tensor(graph.node_counts, device=device, dtype=torch.float32)
-        doc_freq = torch.tensor(graph.node_doc_freq, device=device, dtype=torch.float32)
-        edge_index = torch.tensor(graph.edge_index, device=device, dtype=torch.long)
-        edge_weight = None
-        if graph.edge_weight.size > 0:
-            edge_weight = torch.tensor(graph.edge_weight, device=device, dtype=torch.float32)
+        graph_tensors = get_graph_device_tensors(graph, device)
+        counts = graph_tensors["counts"]
+        doc_freq = graph_tensors["doc_freq"]
+        edge_index = graph_tensors["edge_index"]
+        edge_weight = graph_tensors["edge_weight"]
 
         node_repr = self.encode_nodes(
             node_token_emb,
             edge_index,
             edge_weight,
+            graph=graph,
         )
         item_repr = self.item_proj(item_emb.unsqueeze(0)).expand(node_repr.shape[0], -1)
         freq_repr = torch.stack([
@@ -224,9 +295,10 @@ class EvidenceSelector(nn.Module):
 
         # Hard negatives are selected on detached scores only; BCE still sends
         # gradients through every selected negative logit.
+        detached_scores = utility_scores.detach().tolist()
         hard_sorted = sorted(
             candidate_indices,
-            key=lambda index: (-float(utility_scores[index].detach().item()), index),
+            key=lambda index: (-float(detached_scores[index]), index),
         )
         popular_sorted = sorted(
             candidate_indices,

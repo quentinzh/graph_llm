@@ -36,6 +36,11 @@ class EmbeddingCache:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.index_path = self.cache_dir / "index.json"
         self.index = self._load_index()
+        # 进程内缓存，避免训练热路径反复 torch.load 小文件。
+        self._memory: dict[str, torch.Tensor] = {}
+        self._index_dirty = False
+        self._index_writes_since_flush = 0
+        self._index_flush_every = 64
 
     def _rebuild_index_from_files(self) -> dict[str, str]:
         index: dict[str, str] = {}
@@ -90,6 +95,9 @@ class EmbeddingCache:
 
     def get(self, text: str) -> torch.Tensor | None:
         key = _text_hash(text)
+        memory_vec = self._memory.get(key)
+        if memory_vec is not None:
+            return memory_vec
         rel = self.index.get(key)
         if rel is None:
             path = self.cache_dir / f"{key}.pt"
@@ -102,9 +110,12 @@ class EmbeddingCache:
             self.index.pop(key, None)
             return None
         try:
-            return torch.load(path, map_location="cpu", weights_only=True)
+            vector = torch.load(path, map_location="cpu", weights_only=True)
+            self._memory[key] = vector
+            return vector
         except Exception:
             self.index.pop(key, None)
+            self._memory.pop(key, None)
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -116,14 +127,27 @@ class EmbeddingCache:
         rel = f"{key}.pt"
         path = self.cache_dir / rel
         tmp_path = path.with_suffix(".pt.part")
+        cpu_vector = vector.detach().cpu()
         try:
-            torch.save(vector.detach().cpu(), tmp_path)
+            torch.save(cpu_vector, tmp_path)
             os.replace(tmp_path, path)
         finally:
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
         self.index[key] = rel
+        self._memory[key] = cpu_vector
+        self._index_dirty = True
+        self._index_writes_since_flush += 1
+        if self._index_writes_since_flush >= self._index_flush_every:
+            self.flush_index()
+
+    def flush_index(self) -> None:
+        """将 index.json 批量落盘，减少每个新向量都写盘的开销。"""
+        if not self._index_dirty:
+            return
         self._save_index()
+        self._index_dirty = False
+        self._index_writes_since_flush = 0
 
 
 class QwenEmbeddingEncoder(nn.Module):
@@ -150,6 +174,8 @@ class QwenEmbeddingEncoder(nn.Module):
         self.hidden_size = 2560
         self.tokenizer = None
         self.model = None
+        # 冻结 token surface embedding 的进程内缓存（按 vocab token id）。
+        self._token_emb_cache: dict[int, torch.Tensor] = {}
 
         if fallback_lm is not None and not Path(model_path).exists() and "/" not in model_path:
             self._init_fallback(fallback_lm)
@@ -237,6 +263,8 @@ class QwenEmbeddingEncoder(nn.Module):
                 if self.cache is not None:
                     self.cache.set(texts[global_idx], encoded[local_idx].cpu())
 
+        if self.cache is not None:
+            self.cache.flush_index()
         return out.to(self.device)
 
     @torch.no_grad()
@@ -292,8 +320,17 @@ class QwenEmbeddingEncoder(nn.Module):
         token_ids = [int(t) for t in token_ids]
         if not token_ids:
             return torch.empty((0, self.hidden_size), device=self.device)
-        surfaces = [decode_fn(t) for t in token_ids]
-        return self.encode_texts(surfaces, batch_size=batch_size)
+        missing_ids: list[int] = []
+        for token_id in token_ids:
+            if token_id not in self._token_emb_cache:
+                missing_ids.append(token_id)
+        if missing_ids:
+            surfaces = [decode_fn(t) for t in missing_ids]
+            encoded = self.encode_texts(surfaces, batch_size=batch_size)
+            for token_id, vector in zip(missing_ids, encoded):
+                self._token_emb_cache[token_id] = vector.detach().float().cpu()
+        rows = [self._token_emb_cache[token_id] for token_id in token_ids]
+        return torch.stack(rows, dim=0).to(self.device)
 
 
 class NodeFeatureProjector(nn.Module):

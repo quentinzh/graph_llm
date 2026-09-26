@@ -705,6 +705,7 @@ def test_graph_collater_batch_layout_without_auxiliary_fields():
         profile_records={},
         item_meta={},
         graph_manager=None,
+        materialize_graph_batch=True,
     )
     batch = collater([
         {
@@ -745,6 +746,7 @@ def test_graph_collater_feature_mask_matches_spaced_keyword_variant():
         profile_records={},
         item_meta={},
         graph_manager=None,
+        materialize_graph_batch=True,
     )
     batch = collater([
         {
@@ -773,6 +775,7 @@ def test_graph_collater_feature_mask_filters_short_bpe_pieces():
         profile_records={},
         item_meta={},
         graph_manager=None,
+        materialize_graph_batch=True,
     )
     batch = collater([
         {
@@ -801,6 +804,7 @@ def test_graph_collater_feature_weights_include_local_content_context():
         profile_records={},
         item_meta={},
         graph_manager=None,
+        materialize_graph_batch=True,
     )
     batch = collater([
         {

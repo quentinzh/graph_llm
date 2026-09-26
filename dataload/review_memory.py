@@ -60,6 +60,8 @@ class ReviewMemoryBank:
         self.local_indices = [int(value) for value in local_indices]
         self.top_k_user = int(top_k_user)
         self.top_k_item = int(top_k_item)
+        # 冻结物品向量下，同一 context 的 Top-K 行号可复用。
+        self._prepare_batch_cache: dict[tuple, dict] = {}
         if self.top_k_user < 1 or self.top_k_item < 1:
             raise ValueError("review Top-K values must be positive")
 
@@ -197,7 +199,7 @@ class ReviewMemoryBank:
         selected = torch.topk(scores, k=keep, largest=True, sorted=True).indices
         return row_tensor.index_select(0, selected).tolist()
 
-    def prepare_batch(self, review_contexts, item_queries, device):
+    def prepare_batch(self, review_contexts, item_queries, device, pick_cache=None):
         """返回 prefix projector 所需的固定形状评论张量与 mask。"""
         if item_queries.ndim != 2 or item_queries.shape[0] != len(review_contexts):
             raise ValueError("item_queries must have shape [batch, embedding_dim]")
@@ -219,33 +221,55 @@ class ReviewMemoryBank:
 
         item_queries_cpu = item_queries.detach().float().cpu()
         for batch_idx, context in enumerate(review_contexts):
-            user_rows = self._eligible_rows(
-                self.user_to_rows.get(str(context["raw_user"]), []),
-                context,
-            )
-            selected_user_rows = self._topk(
-                user_rows,
-                item_queries_cpu[batch_idx],
-                self.top_k_user,
-            )
+            item_query_vec = item_queries_cpu[batch_idx]
+            sample_key = (str(context["split_name"]), int(context["local_idx"]))
+            cached = pick_cache.get(sample_key) if pick_cache is not None else None
+            if cached is None:
+                cache_key = (
+                    str(context["raw_user"]),
+                    str(context["raw_item"]),
+                    str(context["split_name"]),
+                    int(context["local_idx"]),
+                    item_query_vec.numpy().tobytes(),
+                )
+                cached = self._prepare_batch_cache.get(cache_key)
+            if cached is None:
+                user_rows = self._eligible_rows(
+                    self.user_to_rows.get(str(context["raw_user"]), []),
+                    context,
+                )
+                selected_user_rows = self._topk(
+                    user_rows,
+                    item_query_vec,
+                    self.top_k_user,
+                )
+                user_query = torch.zeros((self.embedding_dim,), dtype=torch.float32)
+                if selected_user_rows:
+                    selected = self.embeddings[selected_user_rows].float()
+                    user_query = F.normalize(selected.mean(dim=0), dim=-1)
+
+                item_rows = self._eligible_rows(
+                    self.item_to_rows.get(str(context["raw_item"]), []),
+                    context,
+                )
+                item_query = user_query if selected_user_rows else item_query_vec
+                selected_item_rows = self._topk(item_rows, item_query, self.top_k_item)
+                cached = {
+                    "selected_user_rows": selected_user_rows,
+                    "selected_item_rows": selected_item_rows,
+                    "user_query": user_query,
+                }
+                self._prepare_batch_cache[cache_key] = cached
+
+            selected_user_rows = cached["selected_user_rows"]
+            selected_item_rows = cached["selected_item_rows"]
             if selected_user_rows:
                 count = len(selected_user_rows)
                 selected = self.embeddings[selected_user_rows].float()
                 user_reviews[batch_idx, :count] = selected
                 user_mask[batch_idx, :count] = True
-                user_queries[batch_idx] = F.normalize(selected.mean(dim=0), dim=-1)
+                user_queries[batch_idx] = cached["user_query"]
 
-            item_rows = self._eligible_rows(
-                self.item_to_rows.get(str(context["raw_item"]), []),
-                context,
-            )
-            # 冷启动用户没有历史时，退化为当前物品语义查询，仍能选出代表性物品评论。
-            item_query = (
-                user_queries[batch_idx]
-                if selected_user_rows
-                else item_queries_cpu[batch_idx]
-            )
-            selected_item_rows = self._topk(item_rows, item_query, self.top_k_item)
             if selected_item_rows:
                 count = len(selected_item_rows)
                 item_reviews[batch_idx, :count] = self.embeddings[selected_item_rows].float()

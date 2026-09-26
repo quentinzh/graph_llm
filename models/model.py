@@ -139,6 +139,8 @@ class GraphEvidenceCIER(nn.Module):
         self.pad_token_id = int(pad_token_id)
         self.eos_token_ids = tuple(int(x) for x in (eos_token_ids or ()))
         self.special_token_ids = tuple(int(x) for x in special_token_ids)
+        # 证据 bonus 的控制 token 判定与 decode 结果无关，可按 token id 缓存。
+        self._evidence_control_cache: dict[int, bool] = {}
 
         if self.user_review_prefix_len < 0 or self.item_review_prefix_len < 0:
             raise ValueError("review prefix lengths must be non-negative")
@@ -218,6 +220,62 @@ class GraphEvidenceCIER(nn.Module):
         if normalized.isdigit() or len(normalized) <= 1:
             return False
         return any(ch.isalpha() for ch in normalized)
+
+    def _evidence_control_allowed(self, token_id: int) -> bool:
+        token_id = int(token_id)
+        cached = self._evidence_control_cache.get(token_id)
+        if cached is not None:
+            return cached
+        allowed = self._is_evidence_control_token(token_id)
+        self._evidence_control_cache[token_id] = allowed
+        return allowed
+
+    def _prepare_evidence_bonus_plan(
+        self,
+        evidence_token_ids,
+        evidence_token_mask,
+    ):
+        if (
+            self.evidence_bonus == 0
+            or evidence_token_ids is None
+            or evidence_token_mask is None
+            or evidence_token_ids.numel() == 0
+        ):
+            return None
+        batch_indices: list[int] = []
+        token_indices: list[int] = []
+        for batch_idx in range(evidence_token_ids.shape[0]):
+            ids = evidence_token_ids[batch_idx][evidence_token_mask[batch_idx]]
+            for token_id in ids.tolist():
+                token_id = int(token_id)
+                if self._evidence_control_allowed(token_id):
+                    batch_indices.append(batch_idx)
+                    token_indices.append(token_id)
+        if not batch_indices:
+            return None
+        return (
+            torch.tensor(batch_indices, dtype=torch.long),
+            torch.tensor(token_indices, dtype=torch.long),
+        )
+
+    def _apply_evidence_bonus_plan(self, logits, plan):
+        if plan is None or self.evidence_bonus == 0:
+            return logits
+        batch_indices, token_indices = plan
+        batch_indices = batch_indices.to(device=logits.device)
+        token_indices = token_indices.to(device=logits.device)
+        bonus = torch.full(
+            (batch_indices.shape[0],),
+            self.evidence_bonus,
+            device=logits.device,
+            dtype=logits.dtype,
+        )
+        if logits.dim() == 2:
+            logits.index_put_((batch_indices, token_indices), bonus, accumulate=True)
+            return logits
+        for batch_idx, token_id in zip(batch_indices.tolist(), token_indices.tolist()):
+            logits[batch_idx, :, token_id] += self.evidence_bonus
+        return logits
 
     def get_embedding(
         self,
@@ -615,16 +673,8 @@ class GraphEvidenceCIER(nn.Module):
             return logits
         if logits.dim() not in (2, 3):
             raise ValueError(f"Expected logits with shape [B,V] or [B,T,V], got {tuple(logits.shape)}")
-        for batch_idx in range(logits.shape[0]):
-            ids = evidence_token_ids[batch_idx][evidence_token_mask[batch_idx]]
-            for token_id in ids.tolist():
-                token_id = int(token_id)
-                if self._is_evidence_control_token(token_id):
-                    if logits.dim() == 2:
-                        logits[batch_idx, token_id] += self.evidence_bonus
-                    else:
-                        logits[batch_idx, :, token_id] += self.evidence_bonus
-        return logits
+        plan = self._prepare_evidence_bonus_plan(evidence_token_ids, evidence_token_mask)
+        return self._apply_evidence_bonus_plan(logits, plan)
 
     def _repetition_run_length(self, generated_ids):
         if generated_ids is None or generated_ids.shape[1] == 0:
@@ -697,11 +747,35 @@ class GraphEvidenceCIER(nn.Module):
         item_review_query=None,
         user_review_query=None,
     ):
-        text = torch.tensor([[]], dtype=torch.long, device=device)
-        last_words = torch.tensor([[]], dtype=torch.long, device=device)
+        batch_size = profile_ids.shape[0]
+        word = int(word)
+        output = torch.full(
+            (batch_size, word),
+            self.pad_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+        last_words = torch.empty((batch_size, 0), dtype=torch.long, device=device)
         kv_cache = None
         attention_mask = None
-        for _ in range(word):
+        evidence_plan = self._prepare_evidence_bonus_plan(
+            evidence_token_ids,
+            evidence_token_mask,
+        )
+        last_ids = torch.full((batch_size,), -1, dtype=torch.long, device=device)
+        run_lens = torch.zeros(batch_size, dtype=torch.long, device=device)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        stop_token_ids = set(self.eos_token_ids) | {self.pad_token_id}
+        stop_tensor = torch.tensor(
+            sorted(stop_token_ids),
+            dtype=torch.long,
+            device=device,
+        )
+        fill_eos = self.eos_token_ids[0] if self.eos_token_ids else self.pad_token_id
+        floor = -1e4
+        max_repeat = self.max_consecutive_token_repeat
+
+        for step in range(word):
             logits, kv_cache, attention_mask = self.forward(
                 input_ids=last_words,
                 profile_ids=profile_ids if kv_cache is None else None,
@@ -719,15 +793,27 @@ class GraphEvidenceCIER(nn.Module):
                 attention_mask=attention_mask,
                 kv_cache=kv_cache,
             )
-            logits = self._apply_generation_controls(
-                logits,
-                evidence_token_ids=evidence_token_ids,
-                evidence_token_mask=evidence_token_mask,
-                generated_ids=text if text.shape[1] > 0 else None,
-            )
-            last_words = torch.argmax(logits, dim=1).unsqueeze(1)
-            text = last_words if text.shape[1] == 0 else torch.cat([text, last_words], 1)
-        return text.cpu().tolist()
+            logits = self._apply_evidence_bonus_plan(logits, evidence_plan)
+            if step > 0 and max_repeat > 0:
+                repeat_mask = (run_lens >= max_repeat) & (last_ids >= 0)
+                if repeat_mask.any():
+                    logits[repeat_mask, last_ids[repeat_mask]] = floor
+            new_tokens = torch.argmax(logits, dim=1)
+            output[:, step] = new_tokens
+            if step == 0:
+                last_ids = new_tokens
+                run_lens = torch.ones(batch_size, dtype=torch.long, device=device)
+            else:
+                same = new_tokens == last_ids
+                run_lens = torch.where(same, run_lens + 1, torch.ones_like(run_lens))
+                last_ids = new_tokens
+            last_words = new_tokens.unsqueeze(1)
+            finished = finished | torch.isin(new_tokens, stop_tensor)
+            if finished.all():
+                if step + 1 < word:
+                    output[:, step + 1 :] = fill_eos
+                break
+        return output.cpu().tolist()
 
 
 def build_selector_outputs(
