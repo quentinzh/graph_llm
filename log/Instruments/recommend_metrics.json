@@ -1,28 +1,31 @@
 {
-  "baseline": "popularity",
   "val": {
-    "HR@5": 0.0625,
-    "NDCG@5": 0.039433109598216096,
-    "HR@10": 0.0625,
-    "NDCG@10": 0.039433109598216096,
-    "HR@20": 0.0625,
-    "NDCG@20": 0.039433109598216096,
-    "eval_samples": 16.0,
-    "target_rank_mean": 3480.6,
-    "target_rank_median": 4278.0,
-    "score_std_mean": 0.9164625778794289
+    "HR@5": 0.034212002243409985,
+    "NDCG@5": 0.020737939912545265,
+    "HR@10": 0.06409742809069786,
+    "NDCG@10": 0.030454280244408438,
+    "HR@20": 0.08689207595545229,
+    "NDCG@20": 0.03619203368399005,
+    "eval_samples": 24962.0,
+    "target_rank_mean": 2992.389665481577,
+    "target_rank_median": 2380.0,
+    "score_std_mean": 1.75481434510635
   },
   "test": {
-    "HR@5": 0.0625,
-    "NDCG@5": 0.0625,
-    "HR@10": 0.0625,
-    "NDCG@10": 0.0625,
-    "HR@20": 0.0625,
-    "NDCG@20": 0.0625,
-    "eval_samples": 16.0,
-    "target_rank_mean": 3101.733333333333,
-    "target_rank_median": 3213.0,
-    "score_std_mean": 0.9164281785488129
+    "HR@5": 0.025759153913949204,
+    "NDCG@5": 0.016177261728878206,
+    "HR@10": 0.04526880858905536,
+    "NDCG@10": 0.02248952648931856,
+    "HR@20": 0.0651390112971717,
+    "NDCG@20": 0.027450011061464923,
+    "eval_samples": 24962.0,
+    "target_rank_mean": 2969.029087828297,
+    "target_rank_median": 2379.0,
+    "score_std_mean": 1.7534299174826762
   },
-  "sid_fingerprint": "011f8a91f86fd82a"
+  "sid_fingerprint": "011f8a91f86fd82a",
+  "score_pmi_lambda": 0.0,
+  "rec_loss": "item",
+  "use_llm_rec": true,
+  "use_gnn_rec": true
 }

@@ -20,7 +20,7 @@ from graph_llm.dataload.semantic_id import _build_rating_pop
 from graph_llm.dataload.sequential_data import InteractionRecord
 from graph_llm.metrics.rec_ranking import evaluate_ranking
 from graph_llm.models.item_search import recovery_rate
-from graph_llm.models.sid_recommender import SIDRecommender
+from graph_llm.models.sid_recommender import FusionUserEncoder, SIDRecommender
 
 
 def test_sequential_load_and_calib():
@@ -92,3 +92,59 @@ def test_sid_loss_backward():
 def test_search_recovery_identity():
     items = [1, 2, 3, 4, 5]
     assert recovery_rate(items, items, 5) == 1.0
+
+
+def test_fusion_user_encoder_shapes():
+    fuse = FusionUserEncoder(hidden_dim=16, llm_dim=32)
+    g = torch.randn(4, 16)
+    h = torch.randn(4, 32)
+    out = fuse(g, h, use_gnn=True, use_llm=True)
+    assert out.shape == (4, 16)
+    out_llm = fuse(g, h, use_gnn=False, use_llm=True)
+    assert out_llm.shape == (4, 16)
+    out_gnn = fuse(g, None, use_gnn=True, use_llm=False)
+    assert out_gnn.shape == (4, 16)
+
+
+def test_no_llm_fusion_equivalent_to_gnn_only():
+    model = SIDRecommender(
+        embed_dim=8,
+        hidden_dim=16,
+        gnn_layers=1,
+        text_classes=8,
+        llm_dim=32,
+    )
+    g_u = torch.randn(2, 16)
+    h_u = torch.randn(2, 32)
+    fused = model.fuse_user_repr(g_u, h_u, use_gnn=True, use_llm=False)
+    assert torch.allclose(fused, g_u)
+
+
+def test_fusion_gradients_to_gnn_and_llm_proj():
+    model = SIDRecommender(
+        embed_dim=8,
+        hidden_dim=16,
+        gnn_layers=1,
+        text_classes=8,
+        llm_dim=32,
+    )
+    g_u = torch.randn(2, 16, requires_grad=True)
+    h_u = torch.randn(2, 32, requires_grad=True)
+    user = model.fuse_user_repr(g_u, h_u, use_gnn=True, use_llm=True)
+    item_codes = torch.randint(0, 8, (10, 6))
+    item_codes[:, 4] = torch.randint(0, 9, (10,))
+    item_codes[:, 5] = torch.randint(0, 9, (10,))
+    loss = model.item_rec_loss(
+        user,
+        torch.tensor([1, 2]),
+        item_codes,
+        lambda_rating=0.2,
+        lambda_pop=0.1,
+        text_sid_length=4,
+        use_rating_sid=True,
+        use_popularity_sid=True,
+        temperature=4.0,
+    )
+    loss.backward()
+    assert g_u.grad is not None and g_u.grad.abs().sum() > 0
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.fusion.parameters())

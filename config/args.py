@@ -31,6 +31,53 @@ def build_arg_parser():
     parser.add_argument("--epochs", default=50, type=int)
     parser.add_argument("--learning_rate", default=1e-3, type=float)
     parser.add_argument("--early_stop_patience", default=5, type=int)
+    parser.add_argument(
+        "--use_llm_rec",
+        action="store_true",
+        default=True,
+        help="推荐路径使用 Qwen+rec-LoRA 编码用户历史文本并与 GNN 融合",
+    )
+    parser.add_argument("--no_llm_rec", dest="use_llm_rec", action="store_false")
+    parser.add_argument(
+        "--use_gnn_rec",
+        action="store_true",
+        default=True,
+        help="推荐路径使用 GNN 图表示（消融 w/o GNN 时关闭）",
+    )
+    parser.add_argument("--no_gnn_rec", dest="use_gnn_rec", action="store_false")
+    parser.add_argument("--rec_lora_r", default=16, type=int)
+    parser.add_argument("--rec_lora_alpha", default=32, type=int)
+    parser.add_argument("--rec_lora_dropout", default=0.05, type=float)
+    parser.add_argument("--exp_lora_r", default=16, type=int)
+    parser.add_argument("--exp_lora_alpha", default=32, type=int)
+    parser.add_argument("--exp_lora_dropout", default=0.05, type=float)
+    parser.add_argument(
+        "--max_targets_per_user",
+        default=2,
+        type=int,
+        help="每用户最多保留最近 K 条 rec-train 监督样本（控制 LLM 训练步数）",
+    )
+    parser.add_argument("--max_history_items", default=10, type=int)
+    parser.add_argument("--max_history_text_tokens", default=256, type=int)
+    parser.add_argument(
+        "--early_stop_val_samples",
+        default=4096,
+        type=int,
+        help="LLM 模式下每 epoch 验证最多评估的样本数（最终仍全量）",
+    )
+    parser.add_argument("--gradient_checkpointing", action="store_true", default=False)
+    parser.add_argument(
+        "--llm_rec_epochs",
+        default=20,
+        type=int,
+        help="use_llm_rec 时默认训练 epoch 数（见 apply_runtime_defaults）",
+    )
+    parser.add_argument(
+        "--llm_rec_patience",
+        default=3,
+        type=int,
+        help="use_llm_rec 时默认 early stop patience",
+    )
     parser.add_argument("--grad_clip_norm", default=1.0, type=float)
     parser.add_argument(
         "--rec_loss",
@@ -177,3 +224,14 @@ def default_qwen_model_path() -> str:
     if _is_local_model_dir(local):
         return str(local.resolve())
     return str(local)
+
+
+def apply_runtime_defaults(args) -> None:
+    """根据 LLM 推荐开关调整 epoch/patience 等默认值（用户显式传参时不覆盖）。"""
+    if not getattr(args, "use_llm_rec", True):
+        return
+    # 仅在仍为 parser 默认值时替换，避免覆盖用户命令行
+    if getattr(args, "_epochs_from_user", False) is False and args.epochs == 50:
+        args.epochs = int(getattr(args, "llm_rec_epochs", 20))
+    if getattr(args, "_patience_from_user", False) is False and args.early_stop_patience == 5:
+        args.early_stop_patience = int(getattr(args, "llm_rec_patience", 3))

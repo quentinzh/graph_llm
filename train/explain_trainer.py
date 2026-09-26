@@ -10,11 +10,9 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from peft import LoraConfig, get_peft_model
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from graph_llm.dataload.embeddings import RobertaTextEncoder, SmokeTextEncoder, _text_hash
 from graph_llm.dataload.explain_data import (
@@ -33,6 +31,14 @@ from graph_llm.metrics.explain_metrics import (
     evaluate_explanations,
     passes_quality_gate,
 )
+from graph_llm.models.llm_encoder import (
+    EXP_ADAPTER,
+    MockLLMEncoder,
+    REC_ADAPTER,
+    build_qwen_rec_encoder,
+    load_explain_generation_llm,
+    save_exp_adapter,
+)
 from graph_llm.models.sid_recommender import SIDRecommender, build_item_code_matrix
 from graph_llm.train.recommend_trainer import (
     NodeEmbeddingStore,
@@ -40,7 +46,9 @@ from graph_llm.train.recommend_trainer import (
     _build_item_emb_matrix,
     _collate_recommend_batch,
     _encode_graph_nodes,
+    _maybe_encode_llm_batch,
     _precompute_fragment_cache,
+    _user_repr_from_batch,
     build_recommend_samples,
     default_preferred_device_id,
 )
@@ -122,6 +130,7 @@ def _forward_explain_batch(
     device: torch.device,
     args,
     tail_weights: dict[str, float],
+    llm_encoder=None,
 ) -> dict[str, torch.Tensor | float]:
     from graph_llm.train.recommend_trainer import RecommendSample
 
@@ -136,6 +145,15 @@ def _forward_explain_batch(
         for s in batch
     ]
     batch_dict = _collate_recommend_batch(rec_batch, bundle, sid_bundle, device)
+    llm_hidden = _maybe_encode_llm_batch(llm_encoder, batch_dict, bundle, args)
+    user_repr = _user_repr_from_batch(
+        recommender,
+        node_store,
+        batch_dict,
+        device,
+        args,
+        llm_hidden,
+    )
     batched = batch_dict["batched"]
     node_emb = _encode_graph_nodes(
         batch_dict["node_texts"],
@@ -146,7 +164,6 @@ def _forward_explain_batch(
     )
     edge_index = torch.tensor(batched["edge_index"], device=device, dtype=torch.long)
     edge_weight = torch.tensor(batched["edge_weight"], device=device, dtype=torch.float32)
-    batch_index = torch.tensor(batched["batch_index"], device=device, dtype=torch.long)
     node_types = torch.tensor(batched["node_types"], device=device, dtype=torch.long)
 
     node_repr = recommender.encode_nodes_batch(
@@ -155,15 +172,6 @@ def _forward_explain_batch(
         batch_dict["node_ratings"],
         edge_index,
         edge_weight if edge_weight.numel() else None,
-    )
-    user_repr = recommender.encode_history_batch(
-        node_emb,
-        node_types,
-        batch_dict["node_ratings"],
-        edge_index,
-        edge_weight if edge_weight.numel() else None,
-        batch_index,
-        len(batch),
     )
 
     # 证据 BCE（仅 fragment 节点）
@@ -344,6 +352,9 @@ def run_explain(args) -> dict:
     ckpt = _recommend_ckpt_path(args)
     if not ckpt.is_file():
         raise FileNotFoundError(f"推荐 checkpoint 不存在: {ckpt}，请先运行 recommend 模式")
+    rec_ckpt_dir = ckpt.parent
+    state = torch.load(ckpt, map_location="cpu", weights_only=True)
+    has_fusion = any(k.startswith("fusion.") for k in state)
 
     roberta_path = Path(args.roberta_model_path)
     use_mock = bool(getattr(args, "smoke_mock_encoder", False))
@@ -378,6 +389,22 @@ def run_explain(args) -> dict:
         w_max=args.tail_weight_max,
     )
 
+    llm_encoder = None
+    llm_dim = None
+    rec_lora_dir = rec_ckpt_dir / "rec_lora"
+    if has_fusion:
+        if use_mock:
+            llm_encoder = MockLLMEncoder(device, hidden_size=64).to(device)
+            llm_dim = 64
+        elif rec_lora_dir.is_dir():
+            llm_encoder = build_qwen_rec_encoder(args, device)
+            llm_encoder.load_adapter(rec_lora_dir, REC_ADAPTER)
+            llm_encoder.set_active_adapter(REC_ADAPTER)
+            llm_encoder.freeze_adapter(REC_ADAPTER)
+            llm_dim = llm_encoder.hidden_size
+        else:
+            print("WARNING: checkpoint 含 fusion 但未找到 rec_lora，解释阶段仅用 GNN 表示")
+
     recommender = SIDRecommender(
         embed_dim=roberta.hidden_size,
         hidden_dim=args.selector_hidden,
@@ -387,8 +414,9 @@ def run_explain(args) -> dict:
         text_classes=sid_bundle.text_codebook_size,
         use_rating=args.use_rating_sid,
         use_popularity=args.use_popularity_sid,
+        llm_dim=llm_dim,
     ).to(device)
-    recommender.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
+    recommender.load_state_dict(state, strict=False)
     if not args.explain_unfreeze_shared and not getattr(args, "joint_explain_rec", False):
         for p in recommender.parameters():
             p.requires_grad = False
@@ -401,24 +429,12 @@ def run_explain(args) -> dict:
     frag_cache = _precompute_fragment_cache(bundle, roberta, batch_size=args.roberta_encode_batch_size)
     node_store = NodeEmbeddingStore(item_emb_matrix=item_emb_matrix, frag_cache=frag_cache, hidden_size=roberta.hidden_size)
 
-    llm_path = Path(args.llm_model_path)
-    tokenizer = AutoTokenizer.from_pretrained(llm_path, trust_remote_code=True, local_files_only=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    llm = AutoModelForCausalLM.from_pretrained(
-        llm_path,
-        torch_dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
-        trust_remote_code=True,
-        local_files_only=True,
-    ).to(device)
-    lora_cfg = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        task_type="CAUSAL_LM",
+    llm, tokenizer = load_explain_generation_llm(
+        args,
+        device,
+        rec_lora_dir if rec_lora_dir.is_dir() else None,
     )
-    llm = get_peft_model(llm, lora_cfg)
+    llm.set_adapter(EXP_ADAPTER)
 
     rationale_dim = sid_bundle.text_sid_length
     if sid_bundle.use_rating_sid:
@@ -472,6 +488,7 @@ def run_explain(args) -> dict:
                 device,
                 args,
                 tail_weights,
+                llm_encoder=llm_encoder,
             )
             loss = out["loss"]
             optimizer.zero_grad()
@@ -525,10 +542,10 @@ def run_explain(args) -> dict:
                 {
                     "prefix_adapter": prefix_adapter.state_dict(),
                     "evidence_scorer": recommender.evidence_scorer.state_dict(),
-                    "lora": llm.state_dict(),
                 },
                 ckpt_dir / "explainer.bin",
             )
+            save_exp_adapter(llm, ckpt_dir / "exp_lora")
         else:
             patience_left -= 1
             if patience_left <= 0:

@@ -83,6 +83,42 @@ class GraphReadout(nn.Module):
         return out
 
 
+class FusionUserEncoder(nn.Module):
+    """图表示 g_u 与 LLM 序列表示 h_u 融合为 SID 输入。"""
+
+    def __init__(self, hidden_dim: int, llm_dim: int):
+        super().__init__()
+        self.llm_proj = nn.Linear(llm_dim, hidden_dim)
+        self.fuse = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.llm_only = nn.Sequential(
+            nn.Linear(llm_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(
+        self,
+        g_u: torch.Tensor,
+        h_u: torch.Tensor | None,
+        *,
+        use_gnn: bool = True,
+        use_llm: bool = True,
+    ) -> torch.Tensor:
+        if use_llm and h_u is not None:
+            h = self.llm_proj(h_u)
+        else:
+            h = None
+        if use_gnn and use_llm and h is not None:
+            return self.fuse(torch.cat([g_u, h], dim=-1))
+        if use_llm and h is not None and not use_gnn:
+            return self.llm_only(h_u)
+        return g_u
+
+
 class SIDRecommender(nn.Module):
     """推荐主干：历史图 GNN -> 读出 -> SID 并行分类。"""
 
@@ -96,10 +132,13 @@ class SIDRecommender(nn.Module):
         text_classes: int = 256,
         use_rating: bool = True,
         use_popularity: bool = True,
+        llm_dim: int | None = None,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.embed_dim = embed_dim
+        self.llm_dim = llm_dim
+        self.fusion = FusionUserEncoder(hidden_dim, llm_dim) if llm_dim else None
         self.type_emb = nn.Embedding(2, embed_dim)
         self.rating_emb = nn.Embedding(6, embed_dim)  # 0=缺失, 1-5 分桶
         self.input_proj = nn.Sequential(
@@ -165,9 +204,29 @@ class SIDRecommender(nn.Module):
         edge_weight: torch.Tensor | None,
         batch_index: torch.Tensor,
         batch_size: int,
+        llm_hidden: torch.Tensor | None = None,
+        *,
+        use_gnn: bool = True,
+        use_llm: bool = True,
     ) -> torch.Tensor:
-        x = self._gnn_forward(node_emb, node_types, node_ratings, edge_index, edge_weight)
-        return self.readout(x, batch_index, batch_size)
+        if use_gnn and node_emb.numel() > 0:
+            x = self._gnn_forward(node_emb, node_types, node_ratings, edge_index, edge_weight)
+            g_u = self.readout(x, batch_index, batch_size)
+        else:
+            g_u = self.readout.default_user.unsqueeze(0).expand(batch_size, -1)
+        return self.fuse_user_repr(g_u, llm_hidden, use_gnn=use_gnn, use_llm=use_llm)
+
+    def fuse_user_repr(
+        self,
+        g_u: torch.Tensor,
+        h_u: torch.Tensor | None,
+        *,
+        use_gnn: bool = True,
+        use_llm: bool = True,
+    ) -> torch.Tensor:
+        if self.fusion is None or (not use_llm) or h_u is None:
+            return g_u
+        return self.fusion(g_u, h_u, use_gnn=use_gnn, use_llm=use_llm)
 
     def forward_sid_logits(self, user_repr: torch.Tensor) -> dict[str, torch.Tensor]:
         return self.sid_heads(user_repr)

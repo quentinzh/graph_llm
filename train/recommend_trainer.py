@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Semantic ID 推荐训练与评估（GNN -> selector，不加载解释 LLM）。"""
+"""Semantic ID 推荐训练与评估（GNN + 可选 Qwen rec-LoRA 融合）。"""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from graph_llm.dataload.sequential_data import (
     assign_calib_split,
     history_before,
     history_item_indices,
+    item_catalog_text,
     load_sequential_dataset,
 )
 from graph_llm.dataload.semantic_id import (
@@ -43,6 +44,11 @@ from graph_llm.models.item_search import (
     graph_search_seed_items,
     graph_search_top_k,
     recovery_rate,
+)
+from graph_llm.models.llm_encoder import (
+    MockLLMEncoder,
+    REC_ADAPTER,
+    build_qwen_rec_encoder,
 )
 from graph_llm.models.sid_recommender import (
     SIDRecommender,
@@ -166,6 +172,113 @@ def build_recommend_samples(
             )
         )
     return train_samples, val_samples, test_samples
+
+
+def subsample_train_targets_per_user(
+    train_samples: list[RecommendSample],
+    bundle: SequentialDatasetBundle,
+    max_targets_per_user: int,
+) -> list[RecommendSample]:
+    """每用户只保留时间上最近的 K 条监督目标，其余仍可在历史中可见。"""
+    if max_targets_per_user <= 0:
+        return train_samples
+    by_user: dict[int, list[RecommendSample]] = defaultdict(list)
+    for s in train_samples:
+        by_user[s.user_index].append(s)
+    out: list[RecommendSample] = []
+    for samples in by_user.values():
+        samples.sort(key=lambda x: bundle.interaction_by_id[x.interaction_id].timestamp)
+        out.extend(samples[-max_targets_per_user:])
+    return out
+
+
+def _history_title_text(
+    hist: list[InteractionRecord],
+    bundle: SequentialDatasetBundle,
+    *,
+    max_items: int,
+) -> str:
+    """按时间序拼接最近若干商品标题，供 rec-LoRA 编码。"""
+    recs = sorted(hist, key=lambda r: r.timestamp)[-max_items:]
+    parts: list[str] = []
+    for rec in recs:
+        meta = bundle.item_meta.get(rec.raw_item, {})
+        title = str(meta.get("title") or "").strip()
+        if not title:
+            title = item_catalog_text(meta)[:80] if meta else rec.raw_item
+        parts.append(title)
+    return " | ".join(parts) if parts else "No user history."
+
+
+def _build_history_texts(
+    histories: list[list[InteractionRecord]],
+    bundle: SequentialDatasetBundle,
+    args,
+) -> list[str]:
+    max_items = int(getattr(args, "max_history_items", 10))
+    return [_history_title_text(h, bundle, max_items=max_items) for h in histories]
+
+
+def _maybe_encode_llm_batch(
+    llm_encoder,
+    batch_dict: dict,
+    bundle: SequentialDatasetBundle,
+    args,
+) -> torch.Tensor | None:
+    if llm_encoder is None or not getattr(args, "use_llm_rec", True):
+        return None
+    texts = batch_dict.get("history_texts")
+    if texts is None:
+        texts = _build_history_texts(batch_dict["histories"], bundle, args)
+    return llm_encoder.encode(
+        texts,
+        max_length=int(getattr(args, "max_history_text_tokens", 256)),
+    )
+
+
+def _user_repr_from_batch(
+    model: SIDRecommender,
+    node_store: NodeEmbeddingStore,
+    batch_dict: dict,
+    device: torch.device,
+    args,
+    llm_hidden: torch.Tensor | None,
+) -> torch.Tensor:
+    use_gnn = bool(getattr(args, "use_gnn_rec", True))
+    use_llm = bool(getattr(args, "use_llm_rec", True))
+    batched = batch_dict["batched"]
+    batch_size = len(batch_dict["samples"])
+    if use_gnn and batched["node_types"].size > 0:
+        node_emb = _encode_graph_nodes(
+            batch_dict["node_texts"],
+            batched["node_types"],
+            batched["node_item_indices"],
+            node_store,
+            device,
+        )
+        edge_index = torch.tensor(batched["edge_index"], device=device, dtype=torch.long)
+        edge_weight = torch.tensor(batched["edge_weight"], device=device, dtype=torch.float32)
+        batch_index = torch.tensor(batched["batch_index"], device=device, dtype=torch.long)
+        node_types = torch.tensor(batched["node_types"], device=device, dtype=torch.long)
+    else:
+        node_emb = torch.empty((0, node_store.hidden_size), device=device)
+        edge_index = torch.empty((2, 0), device=device, dtype=torch.long)
+        edge_weight = torch.empty((0,), device=device)
+        batch_index = torch.zeros((0,), device=device, dtype=torch.long)
+        node_types = torch.zeros((0,), device=device, dtype=torch.long)
+
+    return model.encode_history_batch(
+        node_emb,
+        node_types,
+        batch_dict["node_ratings"] if batch_dict["node_ratings"].numel() else torch.zeros((0,), device=device, dtype=torch.long),
+        edge_index,
+        edge_weight if edge_weight.numel() else None,
+        batch_index,
+        batch_size,
+        llm_hidden,
+        use_gnn=use_gnn,
+        use_llm=use_llm,
+    )
 
 
 def _history_for_sample(bundle: SequentialDatasetBundle, sample: RecommendSample) -> list[InteractionRecord]:
@@ -302,31 +415,11 @@ def _forward_batch(
     args,
     item_codes: torch.Tensor,
     code_log_priors: list[torch.Tensor],
+    llm_encoder=None,
+    bundle: SequentialDatasetBundle | None = None,
 ) -> dict[str, torch.Tensor | float]:
-    batched = batch_dict["batched"]
-    node_emb = _encode_graph_nodes(
-        batch_dict["node_texts"],
-        batched["node_types"],
-        batched["node_item_indices"],
-        node_store,
-        device,
-    )
-    if node_emb.numel() == 0:
-        user_repr = model.readout.default_user.unsqueeze(0).expand(len(batch_dict["samples"]), -1)
-    else:
-        edge_index = torch.tensor(batched["edge_index"], device=device, dtype=torch.long)
-        edge_weight = torch.tensor(batched["edge_weight"], device=device, dtype=torch.float32)
-        batch_index = torch.tensor(batched["batch_index"], device=device, dtype=torch.long)
-        node_types = torch.tensor(batched["node_types"], device=device, dtype=torch.long)
-        user_repr = model.encode_history_batch(
-            node_emb,
-            node_types,
-            batch_dict["node_ratings"],
-            edge_index,
-            edge_weight if edge_weight.numel() else None,
-            batch_index,
-            len(batch_dict["samples"]),
-        )
+    llm_hidden = _maybe_encode_llm_batch(llm_encoder, batch_dict, bundle, args) if bundle else None
+    user_repr = _user_repr_from_batch(model, node_store, batch_dict, device, args, llm_hidden)
     targets = {
         "text": batch_dict["text_targets"],
         "rating": batch_dict["rating_targets"],
@@ -390,6 +483,7 @@ def _rank_users(
     desc: str = "eval",
     leave: bool = True,
     search_mode: str | None = None,
+    llm_encoder=None,
 ) -> tuple[list[list[int]], dict[str, float]]:
     ks = (5, 10, 20)
     targets = []
@@ -418,30 +512,10 @@ def _rank_users(
         if baseline == "model":
             assert model is not None and node_store is not None
             with torch.no_grad():
-                batched = batch_dict["batched"]
-                node_emb = _encode_graph_nodes(
-                    batch_dict["node_texts"],
-                    batched["node_types"],
-                    batched["node_item_indices"],
-                    node_store,
-                    device,
+                llm_hidden = _maybe_encode_llm_batch(llm_encoder, batch_dict, bundle, args)
+                user_repr = _user_repr_from_batch(
+                    model, node_store, batch_dict, device, args, llm_hidden
                 )
-                edge_index = torch.tensor(batched["edge_index"], device=device, dtype=torch.long)
-                edge_weight = torch.tensor(batched["edge_weight"], device=device, dtype=torch.float32)
-                batch_index = torch.tensor(batched["batch_index"], device=device, dtype=torch.long)
-                node_types = torch.tensor(batched["node_types"], device=device, dtype=torch.long)
-                if node_emb.numel() == 0:
-                    user_repr = model.readout.default_user.unsqueeze(0).expand(len(batch), -1)
-                else:
-                    user_repr = model.encode_history_batch(
-                        node_emb,
-                        node_types,
-                        batch_dict["node_ratings"],
-                        edge_index,
-                        edge_weight if edge_weight.numel() else None,
-                        batch_index,
-                        len(batch),
-                    )
                 logits = model.forward_sid_logits(user_repr)
                 log_probs = logits_to_log_probs(logits)
             batch_scores = vectorized_item_scores(
@@ -580,6 +654,26 @@ def run_recommend(args) -> dict:
         bundle,
         positive_threshold=args.positive_feedback_threshold,
     )
+    train_samples = subsample_train_targets_per_user(
+        train_samples,
+        bundle,
+        int(getattr(args, "max_targets_per_user", 0)),
+    )
+
+    use_llm = bool(getattr(args, "use_llm_rec", True))
+    llm_encoder = None
+    llm_dim = None
+    if use_llm:
+        if use_mock:
+            llm_encoder = MockLLMEncoder(device, hidden_size=64).to(device)
+            llm_dim = 64
+        else:
+            llm_path = Path(args.llm_model_path)
+            if not llm_path.is_dir():
+                raise FileNotFoundError(f"Qwen 未找到: {llm_path}")
+            llm_encoder = build_qwen_rec_encoder(args, device)
+            llm_encoder.set_active_adapter(REC_ADAPTER)
+            llm_dim = llm_encoder.hidden_size
 
     codebook_size = sid_bundle.text_codebook_size
     model = SIDRecommender(
@@ -591,6 +685,7 @@ def run_recommend(args) -> dict:
         text_classes=codebook_size,
         use_rating=args.use_rating_sid,
         use_popularity=args.use_popularity_sid,
+        llm_dim=llm_dim if use_llm and llm_dim else None,
     ).to(device)
 
     item_codes = build_item_code_matrix(sid_bundle, device)
@@ -662,7 +757,11 @@ def run_recommend(args) -> dict:
         print(json.dumps(out, indent=2))
         return out
 
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
+    opt_groups = [{"params": model.parameters()}]
+    if llm_encoder is not None:
+        lr_llm = args.learning_rate * (0.1 if not isinstance(llm_encoder, MockLLMEncoder) else 1.0)
+        opt_groups.append({"params": llm_encoder.parameters(), "lr": lr_llm})
+    optimizer = AdamW(opt_groups, lr=args.learning_rate)
     def _collate_samples(batch: list[RecommendSample]) -> list[RecommendSample]:
         return batch
 
@@ -685,6 +784,8 @@ def run_recommend(args) -> dict:
     epoch_pbar = tqdm(range(args.epochs), desc="epochs", unit="ep")
     for epoch in epoch_pbar:
         model.train()
+        if llm_encoder is not None:
+            llm_encoder.train()
         epoch_losses: dict[str, list[float]] = defaultdict(list)
         for step, batch in enumerate(
             tqdm(
@@ -700,21 +801,39 @@ def run_recommend(args) -> dict:
                 batch = [batch]
             batch_dict = _collate_recommend_batch(list(batch), bundle, sid_bundle, device)
             out_loss = _forward_batch(
-                model, node_store, batch_dict, device, args, item_codes, code_log_priors
+                model,
+                node_store,
+                batch_dict,
+                device,
+                args,
+                item_codes,
+                code_log_priors,
+                llm_encoder=llm_encoder,
+                bundle=bundle,
             )
             loss = out_loss["loss"]
             optimizer.zero_grad()
             loss.backward()
             if args.grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+                params = list(model.parameters())
+                if llm_encoder is not None:
+                    params += list(llm_encoder.parameters())
+                torch.nn.utils.clip_grad_norm_(params, args.grad_clip_norm)
             optimizer.step()
             epoch_losses["loss_total"].append(float(loss.detach().cpu()))
             epoch_losses["loss_sid"].append(float(out_loss["loss_sid"]))
             epoch_losses["loss_item"].append(float(out_loss["loss_item"]))
 
         model.eval()
+        if llm_encoder is not None:
+            llm_encoder.eval()
         eval_limit_batches = args.max_eval_batches
-        eval_val = val_samples[: eval_limit_batches * args.eval_batch_size] if eval_limit_batches else val_samples
+        if eval_limit_batches:
+            eval_val = val_samples[: eval_limit_batches * args.eval_batch_size]
+        elif use_llm and int(getattr(args, "early_stop_val_samples", 0)) > 0:
+            eval_val = val_samples[: int(args.early_stop_val_samples)]
+        else:
+            eval_val = val_samples
         _, val_metrics = _rank_users(
             model,
             node_store,
@@ -730,6 +849,7 @@ def run_recommend(args) -> dict:
             desc=f"val[e{epoch + 1}]",
             leave=False,
             search_mode="exact",
+            llm_encoder=llm_encoder,
         )
         ndcg10 = float(val_metrics.get("NDCG@10", 0.0))
         record = {
@@ -751,6 +871,8 @@ def run_recommend(args) -> dict:
             best_ndcg = ndcg10
             patience_left = int(args.early_stop_patience)
             torch.save(model.state_dict(), ckpt_dir / "sid_recommender.bin")
+            if llm_encoder is not None and hasattr(llm_encoder, "save_adapter"):
+                llm_encoder.save_adapter(ckpt_dir / "rec_lora", REC_ADAPTER)
             print(f"save recommend checkpoint (valid NDCG@10={ndcg10:.6f})")
         else:
             patience_left -= 1
@@ -762,6 +884,10 @@ def run_recommend(args) -> dict:
     model.eval()
     if (ckpt_dir / "sid_recommender.bin").is_file():
         model.load_state_dict(torch.load(ckpt_dir / "sid_recommender.bin", map_location=device, weights_only=True))
+    rec_lora_dir = ckpt_dir / "rec_lora"
+    if llm_encoder is not None and rec_lora_dir.is_dir():
+        llm_encoder.load_adapter(rec_lora_dir, REC_ADAPTER)
+        llm_encoder.set_active_adapter(REC_ADAPTER)
 
     if getattr(args, "auto_pmi_lambda", False):
         eval_limit = args.max_eval_batches
@@ -782,6 +908,7 @@ def run_recommend(args) -> dict:
             code_log_priors=code_log_priors,
             desc="val[pmi_base]",
             search_mode="exact",
+            llm_encoder=llm_encoder,
         )
         base_ndcg = float(base_val.get("NDCG@10", 0.0))
         best_lam = 0.0
@@ -802,6 +929,7 @@ def run_recommend(args) -> dict:
                 code_log_priors=code_log_priors,
                 desc=f"val[pmi_{lam}]",
                 search_mode="exact",
+                llm_encoder=llm_encoder,
             )
             nd = float(vm.get("NDCG@10", 0.0))
             if nd >= base_ndcg - 1e-9 and nd >= best_ndcg:
@@ -828,6 +956,7 @@ def run_recommend(args) -> dict:
         code_log_priors=code_log_priors,
         desc="val[final]",
         search_mode="exact",
+        llm_encoder=llm_encoder,
     )
     _, test_metrics = _rank_users(
         model,
@@ -843,6 +972,7 @@ def run_recommend(args) -> dict:
         code_log_priors=code_log_priors,
         desc="test[final]",
         search_mode="exact",
+        llm_encoder=llm_encoder,
     )
 
     out = {
@@ -851,6 +981,8 @@ def run_recommend(args) -> dict:
         "sid_fingerprint": sid_bundle.fingerprint,
         "score_pmi_lambda": args.score_pmi_lambda,
         "rec_loss": getattr(args, "rec_loss", "item"),
+        "use_llm_rec": use_llm,
+        "use_gnn_rec": bool(getattr(args, "use_gnn_rec", True)),
     }
     log_path = log_dir / "recommend_metrics.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)

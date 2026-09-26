@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 import torch
 
-from graph_llm.config import build_arg_parser, resolve_dataset_paths
+from graph_llm.config import build_arg_parser, apply_runtime_defaults, resolve_dataset_paths
 from graph_llm.train.explain_trainer import run_explain
 from graph_llm.train.recommend_trainer import run_recommend
 
@@ -36,6 +36,7 @@ def seed_everything(seed: int = 5254) -> None:
 if __name__ == "__main__":
     parser = build_arg_parser()
     args = parser.parse_args()
+    apply_runtime_defaults(args)
     seed_everything(args.seed)
     resolve_dataset_paths(args)
     if getattr(args, "mode", "recommend") == "explain":
