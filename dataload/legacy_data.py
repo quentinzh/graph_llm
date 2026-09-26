@@ -61,6 +61,13 @@ def read_split_indices(data_dir, dataset_name, split_index):
 
 
 def dataset_split(dataset, split_index, args):
+    # PLEASER 表在加载时已写入 split 列，直接按列划分即可。
+    if "split" in dataset.columns:
+        train_dataset = dataset[dataset["split"] == "train"].reset_index(drop=True)
+        valid_dataset = dataset[dataset["split"] == "validation"].reset_index(drop=True)
+        test_dataset = dataset[dataset["split"] == "test"].reset_index(drop=True)
+        return train_dataset, valid_dataset, test_dataset
+
     indices = read_split_indices(args.data_dir, args.dataset_name, split_index)
     train_dataset = dataset.iloc[indices["train"]].reset_index(drop=True)
     valid_dataset = dataset.iloc[indices["validation"]].reset_index(drop=True)

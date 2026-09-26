@@ -126,14 +126,11 @@ def ensure_tokenizer_ready(tokenizer):
 
 
 def load_item_meta(args):
-    item_path = Path(args.data_dir) / args.dataset_name / "item.json"
-    if not item_path.is_file():
-        print(f"WARNING: item metadata not found at {item_path}; using empty item_meta.")
-        return {}
-    print(f"Loading item metadata from {item_path}")
-    with item_path.open("r", encoding="utf-8") as f:
-        rows = json.load(f)
-    meta = {str(row.get("item")): row for row in rows if row.get("item") is not None}
+    from graph_llm.dataload.pleaser import load_pleaser_item_meta
+
+    data_dir = Path(args.data_dir)
+    print(f"Loading PLEASER item metadata for {args.dataset_name!r} from {data_dir}")
+    meta = load_pleaser_item_meta(data_dir, args.dataset_name)
     print(f"Loaded metadata for {len(meta)} items")
     return meta
 
@@ -443,7 +440,7 @@ def build_dataset(args, tokenizer):
     cache_path = dataset_cache_path(args)
     required = {
         "user", "item", "raw_user", "raw_item", "text", "keyword",
-        "keyword_words", "review_text", "rating",
+        "keyword_words", "review_text", "rating", "split",
     }
     if cache_path.exists() and not args.rebuild_dataset_cache:
         print(f"Loading dataset cache: {cache_path}")
@@ -454,10 +451,11 @@ def build_dataset(args, tokenizer):
             print(f"Loaded cached dataset with {len(dataset)} rows")
             return dataset
 
-    reviews_path = data_path / "reviews.pickle"
-    print(f"Reading reviews from {reviews_path}")
-    raw_reviews = pd.read_pickle(reviews_path)
-    dataset = pd.DataFrame(raw_reviews)
+    from graph_llm.dataload.pleaser import load_pleaser_frame
+
+    print(f"Loading PLEASER interactions for {args.dataset_name!r} from {data_path}")
+    pleaser_frame = load_pleaser_frame(Path(args.data_dir), args.dataset_name)
+    dataset = pleaser_frame.copy()
     dataset["raw_user"] = dataset["user"].astype(str)
     dataset["raw_item"] = dataset["item"].astype(str)
 
@@ -465,21 +463,27 @@ def build_dataset(args, tokenizer):
     dataset["user"] = encoder.fit_transform(dataset["raw_user"]).tolist()
     dataset["item"] = encoder.fit_transform(dataset["raw_item"]).tolist()
 
-    keywords, keyword_words, text, review_text = [], [], [], []
+    keywords, keyword_words, text, review_text_col = [], [], [], []
     eos_id = tokenizer_eos_id(tokenizer)
-    for row in tqdm(dataset["template"], desc="Tokenizing explanations"):
-        keywords.append(tokenizer(row[0], add_special_tokens=False)["input_ids"])
-        keyword_words.append(row[0])
-        review_text.append(row[2])
-        text.append(tokenizer(row[2], add_special_tokens=False)["input_ids"] + [eos_id])
+    for feature, explanation in tqdm(
+        zip(dataset["feature"], dataset["review_text"]),
+        total=len(dataset),
+        desc="Tokenizing explanations",
+    ):
+        feature_text = "" if feature is None else str(feature)
+        review_text = "" if explanation is None else str(explanation)
+        keywords.append(tokenizer(feature_text, add_special_tokens=False)["input_ids"])
+        keyword_words.append(feature_text)
+        review_text_col.append(review_text)
+        text.append(tokenizer(review_text, add_special_tokens=False)["input_ids"] + [eos_id])
     dataset["text"] = text
     dataset["keyword"] = keywords
     dataset["keyword_words"] = keyword_words
-    dataset["review_text"] = review_text
+    dataset["review_text"] = review_text_col
     dataset = dataset[
         [
             "user", "item", "raw_user", "raw_item", "text", "keyword",
-            "keyword_words", "review_text", "rating",
+            "keyword_words", "review_text", "rating", "split",
         ]
     ]
     dataset.to_pickle(cache_path)

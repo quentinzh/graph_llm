@@ -20,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from graph_llm.config.datasets import resolve_dataset_paths
-from graph_llm.dataload.legacy_data import read_split_indices
+from graph_llm.dataload.pleaser import load_pleaser_frame, load_pleaser_item_meta
 from graph_llm.metrics.metrics import DEFAULT_STOP_TOKENS
 
 BRAND_SPARSE_SUFFIX = (
@@ -260,6 +260,12 @@ def _review_text_parts(row: dict) -> list[str]:
             parts.append(str(template[0]))
         if len(template) >= 2:
             parts.append(str(template[1]))
+    if row.get("keyword_words"):
+        parts.append(str(row["keyword_words"]))
+    if row.get("feature"):
+        parts.append(str(row["feature"]))
+    if row.get("review_text"):
+        parts.append(str(row["review_text"]))
     return parts
 
 
@@ -364,34 +370,24 @@ def generate_profiles(
     top_price_items_n: int = 5,
     evidence_limit: int = 50,
 ):
-    reviews = pd.DataFrame(pd.read_pickle(data_dir / dataset_name / "reviews.pickle"))
+    reviews = load_pleaser_frame(data_dir, dataset_name)
     reviews["raw_user"] = reviews["user"].astype(str)
     reviews["raw_item"] = reviews["item"].astype(str)
-    item_path = data_dir / dataset_name / "item.json"
-    if item_path.is_file():
-        import json
+    reviews["keyword_words"] = reviews["feature"].astype(str)
+    item_meta = load_pleaser_item_meta(data_dir, dataset_name)
 
-        item_rows = json.load(item_path.open("r", encoding="utf-8"))
-        item_meta = {
-            str(row.get("item")): row for row in item_rows if row.get("item") is not None
-        }
-    else:
-        print(f"WARNING: no item.json at {item_path}; profiles will use sparse metadata.")
-        item_meta = {}
-
-    split_indices = read_split_indices(data_dir, dataset_name, fold)
     out_dir = profile_dir / dataset_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for scope in scopes:
         if scope == "train":
-            row_indices = split_indices["train"]
+            scoped = reviews[reviews["split"] == "train"].reset_index(drop=True)
         elif scope == "train_valid":
-            row_indices = split_indices["train"] + split_indices["validation"]
+            scoped = reviews[reviews["split"].isin(["train", "validation"])].reset_index(
+                drop=True
+            )
         else:
             raise ValueError(f"Unsupported scope: {scope}")
-
-        scoped = reviews.iloc[row_indices].reset_index(drop=True)
         profiles = {}
         for raw_user, group in scoped.groupby("raw_user", sort=False):
             interactions = group.to_dict("records")

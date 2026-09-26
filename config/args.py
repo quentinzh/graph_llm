@@ -322,7 +322,7 @@ def build_arg_parser():
     parser.add_argument(
         "--dataset_name",
         "--dataset",
-        default="Amazon/MoviesAndTV_corsa_filtered_small_15pct/",
+        default="Software",
         type=str,
     )
     parser.add_argument("--data_dir", default=str(PACKAGE_ROOT / "data"), type=str)

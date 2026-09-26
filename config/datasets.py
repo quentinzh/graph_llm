@@ -1,64 +1,56 @@
-"""Dataset path resolution for graph_llm."""
+"""Dataset path resolution for graph_llm (PLEASER categories only)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from graph_llm.dataload.pleaser import (
+    PLEASER_DATASET_NAMES,
+    canonical_pleaser_name,
+    pleaser_dataset_dir,
+)
+
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = PACKAGE_ROOT.parent
 
 
-def dataset_name_candidates(name: str) -> list[str]:
-    """Return canonical dataset name candidates for a user-provided short name."""
-    clean = str(name).strip().strip("/")
-    if not clean:
-        return []
-    candidates = [clean]
-    if not clean.startswith("Amazon/"):
-        candidates.append(f"Amazon/{clean}")
-    return list(dict.fromkeys(candidates))
-
-
 def resolve_dataset_paths(args) -> None:
-    """Resolve args.dataset_name and args.data_dir from user input.
+    """Resolve args.dataset_name and args.data_dir for a PLEASER dataset.
 
-    Searches args.data_dir (default graph_llm/data) then repo data/ for
-    reviews.pickle under each canonical name candidate.
+    在仓库 ``data/{Name}/`` 或 ``args.data_dir/{Name}/`` 下查找
+    ``sequences.jsonl`` / ``reviews.jsonl`` / ``items.jsonl``。
     """
     user_name = str(args.dataset_name).strip().strip("/")
-    candidates = dataset_name_candidates(user_name)
-    if not candidates:
-        raise ValueError("dataset_name must not be empty")
+    canonical = canonical_pleaser_name(user_name)
+    if canonical is None:
+        raise ValueError(
+            f"Unknown dataset {user_name!r}. "
+            f"Supported PLEASER datasets: {', '.join(PLEASER_DATASET_NAMES)}"
+        )
 
-    search_roots = []
-    for root in [Path(args.data_dir), PACKAGE_ROOT / "data", REPO_ROOT / "data"]:
+    search_roots: list[Path] = []
+    for root in (Path(args.data_dir), REPO_ROOT / "data", PACKAGE_ROOT / "data"):
         root = root.resolve()
         if root not in search_roots:
             search_roots.append(root)
 
-    tried = []
+    tried: list[str] = []
     for root in search_roots:
-        for canonical in candidates:
-            reviews_path = root / canonical / "reviews.pickle"
-            tried.append(str(reviews_path))
-            if reviews_path.is_file():
-                # Match graph2's verbatim cache naming. graph2 run.sh uses
-                # "Amazon/X/" (trailing slash -> Amazon__X__) for Amazon datasets,
-                # while flat names like "TripAdvisor_corsa_filtered" have no slash
-                # (-> TripAdvisor_corsa_filtered). Keep a trailing slash only when
-                # the canonical name contains a path separator.
-                if "/" in canonical:
-                    args.dataset_name = canonical.rstrip("/") + "/"
-                else:
-                    args.dataset_name = canonical
-                args.data_dir = str(root)
-                print(
-                    f"Resolved dataset '{user_name}' -> "
-                    f"dataset_name={args.dataset_name!r}, data_dir={root}"
-                )
-                return
+        dataset_dir = root / canonical
+        tried.append(str(dataset_dir))
+        try:
+            pleaser_dataset_dir(root, canonical)
+        except (FileNotFoundError, ValueError):
+            continue
+        args.dataset_name = canonical
+        args.data_dir = str(root)
+        print(
+            f"Resolved dataset '{user_name}' -> "
+            f"dataset_name={args.dataset_name!r}, data_dir={root}"
+        )
+        return
 
     raise FileNotFoundError(
-        f"Could not resolve dataset {user_name!r}. Tried:\n  "
-        + "\n  ".join(tried)
+        f"Could not resolve PLEASER dataset {user_name!r} ({canonical}). "
+        f"Tried directories:\n  " + "\n  ".join(tried)
     )
