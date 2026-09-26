@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import itertools
 import math
+import os
 import re
 from collections import Counter
 
@@ -161,6 +162,60 @@ def rouge(hypotheses, references):
 
 def rouge_score(references, generated):
     return {key: value * 100 for key, value in rouge(generated, references).items()}
+
+
+def _default_bertscore_device():
+    """默认在 cuda:1 上算 BERTScore；无多卡时退回 cuda:0 或 CPU。"""
+    import torch
+
+    if not torch.cuda.is_available():
+        return "cpu"
+    if torch.cuda.device_count() > 1:
+        return "cuda:1"
+    return "cuda:0"
+
+
+def compute_bertscore(
+    references: list[str],
+    hypotheses: list[str],
+    device=None,
+) -> tuple[float, float, float]:
+    """BERTScore P/R/F1（0–1 均值），与 ExpLMGCN 口径一致（无 baseline 重标定）。"""
+    if not references or not hypotheses:
+        return 0.0, 0.0, 0.0
+    if len(references) != len(hypotheses):
+        raise ValueError("BERTScore references and hypotheses must have equal length")
+
+    os.environ.setdefault("HF_ENDPOINT", os.environ.get("HF_ENDPOINT", "https://hf-mirror.com"))
+    try:
+        from bert_score import score as bert_score_fn
+    except ImportError as exc:
+        raise RuntimeError(
+            "bert-score is required for BERTScore evaluation. "
+            "Install with `pip install bert-score` or pass --skip_bertscore."
+        ) from exc
+
+    import torch
+
+    if device is None:
+        device = _default_bertscore_device()
+    elif isinstance(device, torch.device):
+        device = str(device)
+
+    try:
+        precision, recall, f1 = bert_score_fn(
+            hypotheses,
+            references,
+            lang="en",
+            verbose=False,
+            device=device,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to compute BERTScore. Ensure the model is available via the "
+            "configured Hugging Face mirror, or pass --skip_bertscore."
+        ) from exc
+    return float(precision.mean()), float(recall.mean()), float(f1.mean())
 
 
 def two_seq_same(sa, sb):

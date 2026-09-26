@@ -2,6 +2,7 @@
 
 from graph_llm.metrics.metrics import (
     bleu_score,
+    compute_bertscore,
     feature_coverage_ratio,
     feature_detect,
     feature_diversity,
@@ -14,6 +15,7 @@ from graph_llm.metrics.metrics import (
 
 __all__ = [
     "bleu_score",
+    "compute_bertscore",
     "feature_coverage_ratio",
     "feature_detect",
     "feature_diversity",

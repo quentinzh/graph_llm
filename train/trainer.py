@@ -70,6 +70,7 @@ from graph_llm.dataload.tail_stats import (
 from graph_llm.metrics.metrics import (
     assign_tail_demand_groups,
     bleu_score,
+    compute_bertscore,
     compute_tail_demand_from_tokens,
     corpus_diversity,
     feature_coverage_ratio,
@@ -1271,6 +1272,7 @@ def append_eval_metrics(
     indices=None,
     group_name=None,
     group_info=None,
+    skip_bertscore=False,
 ):
     if indices is None:
         indices = list(range(len(predict)))
@@ -1280,6 +1282,7 @@ def append_eval_metrics(
     pad_id = tokenizer_pad_id(tokenizer)
     eos_ids = tokenizer_eos_ids(tokenizer)
     skip_ids = tokenizer_skip_ids(tokenizer)
+    bertscore_metrics = {}
 
     with open(log_name, "a+", encoding="utf-8") as f:
         if group_name is not None:
@@ -1340,6 +1343,17 @@ def append_eval_metrics(
         rouge_metrics = rouge_score(text_test, text_predict)
         for key, value in rouge_metrics.items():
             f.write("{} {:7.4f}\n".format(key, value))
+        bertscore_metrics = {}
+        if not skip_bertscore:
+            bs_p, bs_r, bs_f1 = compute_bertscore(text_test, text_predict)
+            bertscore_metrics = {
+                "BERTScore Precision": bs_p,
+                "BERTScore Recall": bs_r,
+                "BERTScore F1": bs_f1,
+            }
+            f.write("BERTScore Precision {:7.4f}\n".format(bs_p))
+            f.write("BERTScore Recall {:7.4f}\n".format(bs_r))
+            f.write("BERTScore F1 {:7.4f}\n".format(bs_f1))
     return {
         "BLEU-1": bleu_1,
         "BLEU-2": bleu_2,
@@ -1352,6 +1366,7 @@ def append_eval_metrics(
         "FCR": fcr,
         "FMR": fmr,
         **rouge_metrics,
+        **bertscore_metrics,
     }
 
 
@@ -1462,6 +1477,7 @@ def test_step(
             indices=all_indices,
             group_name="all",
             group_info=group_info,
+            skip_bertscore=getattr(args, "skip_bertscore", False),
         )
         for group_name, group_indices in eval_groups["indices"].items():
             subset = _subset_group_indices(group_indices)
@@ -1475,10 +1491,19 @@ def test_step(
                 indices=subset,
                 group_name=group_name,
                 group_info=group_info,
+                skip_bertscore=getattr(args, "skip_bertscore", False),
             )
         return all_metrics
     else:
-        return append_eval_metrics(log_name, dataset, tokenizer, predict, label, output_dir)
+        return append_eval_metrics(
+            log_name,
+            dataset,
+            tokenizer,
+            predict,
+            label,
+            output_dir,
+            skip_bertscore=getattr(args, "skip_bertscore", False),
+        )
 
 
 def load_best_checkpoint(model, ckpt_prefix, device):

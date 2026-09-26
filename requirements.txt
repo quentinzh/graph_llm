@@ -13,3 +13,4 @@ tqdm==4.67.3
 sentencepiece==0.2.1
 protobuf==6.32.0
 safetensors==0.7.0
+bert-score>=0.3.13

@@ -294,6 +294,11 @@ def build_arg_parser():
         help="If >0, run at most this many test batches during evaluation (quick smoke).",
     )
     parser.add_argument(
+        "--skip_bertscore",
+        action="store_true",
+        help="Skip BERTScore during evaluation (faster smoke/debug runs).",
+    )
+    parser.add_argument(
         "--max_train_batches",
         default=0,
         type=int,

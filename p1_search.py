@@ -47,6 +47,9 @@ METRIC_COLUMNS = [
     "rouge_2",
     "rouge_4",
     "rouge_l",
+    "BERTScore Precision",
+    "BERTScore Recall",
+    "BERTScore F1",
 ]
 
 
