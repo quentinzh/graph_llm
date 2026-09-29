@@ -31,7 +31,6 @@ from graph_llm.dataload.legacy_data import dataset_split, tokenizer_pad_id
 from graph_llm.train.trainer import (
     append_eval_metrics,
     build_dataset,
-    get_tail_demand_eval_groups,
     tokenizer_eos_ids,
 )
 
@@ -136,8 +135,6 @@ def recompute_metrics_from_generate(args) -> Path:
         handle.write(f"split_index:{split_index}\n")
         handle.write(f"samples:{len(predict)}\n")
 
-    eval_groups = get_tail_demand_eval_groups(test_set, tokenizer, args)
-    group_info = eval_groups.get("info", "")
     all_indices = list(range(len(predict)))
 
     append_eval_metrics(
@@ -149,21 +146,8 @@ def recompute_metrics_from_generate(args) -> Path:
         output_dir=None,
         indices=all_indices,
         group_name="all",
-        group_info=group_info,
+        group_info=None,
     )
-    for group_name, group_indices in eval_groups["indices"].items():
-        subset = [idx for idx in group_indices if idx < len(predict)]
-        append_eval_metrics(
-            str(log_path),
-            test_set,
-            tokenizer,
-            predict,
-            label,
-            output_dir=None,
-            indices=subset,
-            group_name=group_name,
-            group_info=group_info,
-        )
 
     print(f"Wrote {log_path}")
     print(log_path.read_text(encoding="utf-8"))

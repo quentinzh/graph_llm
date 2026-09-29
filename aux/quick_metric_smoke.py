@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Quick CPU smoke test for CIER-aligned eval metrics and tail-demand groups."""
+"""Quick CPU smoke test for CIER-aligned eval metrics (all split only)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from graph_llm.dataload.legacy_data import dataset_split
 from graph_llm.train.trainer import (
     append_eval_metrics,
     build_dataset,
-    get_tail_demand_eval_groups,
     output_path_with_group,
 )
 
@@ -50,11 +49,8 @@ def run_quick_metric_smoke(args) -> Path:
     with tempfile.TemporaryDirectory() as tmpdir:
         log_path = Path(tmpdir) / "quick_metric_smoke.log"
         output_base = str(Path(tmpdir) / "generate.dataset")
-        eval_groups = get_tail_demand_eval_groups(test_set, tokenizer, args)
         all_indices = list(range(n))
-        group_info = (
-            f"quick_metric_smoke samples={n} | " + eval_groups.get("info", "")
-        )
+        group_info = f"quick_metric_smoke samples={n}"
         append_eval_metrics(
             str(log_path),
             test_set,
@@ -66,19 +62,6 @@ def run_quick_metric_smoke(args) -> Path:
             group_name="all",
             group_info=group_info,
         )
-        for group_name, group_indices in eval_groups["indices"].items():
-            subset = [idx for idx in group_indices if idx < n]
-            append_eval_metrics(
-                str(log_path),
-                test_set,
-                tokenizer,
-                predict,
-                label,
-                output_path_with_group(output_base, group_name),
-                indices=subset,
-                group_name=group_name,
-                group_info=group_info,
-            )
 
         dest = Path(args.log_dir) / args.dataset_name
         dest.mkdir(parents=True, exist_ok=True)

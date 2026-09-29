@@ -1555,56 +1555,30 @@ def test_step(
                 print(f"Stopping test early after {max_batches} batches (--max_eval_batches).")
                 break
 
-    def _subset_group_indices(group_indices):
-        n = len(predict)
-        return [idx for idx in group_indices if idx < n]
-
-    if getattr(args, "eval_tail_demand_groups", False):
-        eval_groups = get_tail_demand_eval_groups(dataset, tokenizer, args)
-        all_indices = list(range(len(predict)))
-        group_info = eval_groups.get("info")
-        if max_batches:
-            group_info = (
-                f"max_eval_batches: {max_batches} | evaluated_samples: {len(predict)} | "
-                + (group_info or "")
-            )
-        all_metrics = append_eval_metrics(
-            log_name,
-            dataset,
-            tokenizer,
-            predict,
-            label,
-            output_path_with_group(output_dir, "all"),
-            indices=all_indices,
-            group_name="all",
-            group_info=group_info,
-            skip_bertscore=getattr(args, "skip_bertscore", False),
+    # 仅评估全量样本（all），不再按 tail-demand 划分 low/high。
+    all_indices = list(range(len(predict)))
+    group_info = None
+    if max_batches:
+        group_info = (
+            f"max_eval_batches: {max_batches} | evaluated_samples: {len(predict)}"
         )
-        for group_name, group_indices in eval_groups["indices"].items():
-            subset = _subset_group_indices(group_indices)
-            append_eval_metrics(
-                log_name,
-                dataset,
-                tokenizer,
-                predict,
-                label,
-                output_path_with_group(output_dir, group_name),
-                indices=subset,
-                group_name=group_name,
-                group_info=group_info,
-                skip_bertscore=getattr(args, "skip_bertscore", False),
-            )
-        return all_metrics
-    else:
-        return append_eval_metrics(
-            log_name,
-            dataset,
-            tokenizer,
-            predict,
-            label,
-            output_dir,
-            skip_bertscore=getattr(args, "skip_bertscore", False),
-        )
+    save_path = (
+        output_path_with_group(output_dir, "all")
+        if output_dir is not None
+        else None
+    )
+    return append_eval_metrics(
+        log_name,
+        dataset,
+        tokenizer,
+        predict,
+        label,
+        save_path,
+        indices=all_indices,
+        group_name="all",
+        group_info=group_info,
+        skip_bertscore=getattr(args, "skip_bertscore", False),
+    )
 
 
 def load_best_checkpoint(model, ckpt_prefix, device):

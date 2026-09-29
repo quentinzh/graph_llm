@@ -893,6 +893,8 @@ def test_standalone_metrics_available():
     assert 0.0 <= b2 <= 1.0
     scores = rouge_score(["great movie"], ["great story"])
     assert {"rouge_1", "rouge_2", "rouge_4", "rouge_l"}.issubset(scores)
+    for key in ("rouge_1", "rouge_2", "rouge_4", "rouge_l"):
+        assert 0.0 <= scores[key] <= 1.0
 
 
 def test_derive_profiles_from_parent_subset():
