@@ -74,6 +74,34 @@ def test_graph_device_tensors_cached_once():
     assert t1["edge_index"] is t2["edge_index"]
 
 
+def test_graph_device_tensors_cpu_cache_not_on_gpu():
+    import numpy as np
+
+    graph = UserTokenGraph(
+        node_token_ids=np.array([1, 2], dtype=np.int64),
+        node_surfaces=["a", "b"],
+        node_counts=np.array([1.0, 1.0], dtype=np.float32),
+        node_doc_freq=np.array([1.0, 1.0], dtype=np.float32),
+        edge_index=np.array([[0], [1]], dtype=np.int64),
+        edge_weight=np.array([1.0], dtype=np.float32),
+        in_degree=np.array([0.0, 1.0], dtype=np.float32),
+        out_degree=np.array([1.0, 0.0], dtype=np.float32),
+    )
+    if not torch.cuda.is_available():
+        return
+    device = torch.device("cuda:0")
+    gpu_out = get_graph_device_tensors(graph, device)
+    assert gpu_out["edge_index"].is_cuda
+    cpu_cache = graph._device_tensors["cpu"]
+    for value in cpu_cache.values():
+        if value is not None:
+            assert not value.is_cuda
+    gpu_out2 = get_graph_device_tensors(graph, device)
+    assert gpu_out2["edge_index"].is_cuda
+    # GPU 侧每次是新张量，不挂在图对象上。
+    assert gpu_out["edge_index"] is not gpu_out2["edge_index"]
+
+
 def test_magnet_graph_id_cache():
     conv = MagNetConv(4, 4, q=0.15)
     import numpy as np
@@ -99,5 +127,6 @@ def test_magnet_graph_id_cache():
 if __name__ == "__main__":
     test_lite_collate_and_resolve_batch_graphs()
     test_graph_device_tensors_cached_once()
+    test_graph_device_tensors_cpu_cache_not_on_gpu()
     test_magnet_graph_id_cache()
     print("speedup round2 smoke: ok")

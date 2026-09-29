@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -202,6 +203,61 @@ def resolve_attn_implementation(requested):
         "the active Python environment. Use graph_llm_fa2 (see "
         "graph_llm/aux/setup_graph_fa2_env.sh) or install flash-attn manually."
     )
+
+
+def training_autocast_dtype(args):
+    """与 --torch_dtype 对齐的 autocast dtype；float32 训练返回 None（不用 autocast）。"""
+    resolved = resolve_torch_dtype(args.torch_dtype)
+    if resolved == "auto":
+        return torch.bfloat16
+    if resolved == torch.float32:
+        return None
+    return resolved
+
+
+def create_training_grad_scaler(args):
+    """仅 float16 训练启用 GradScaler；bf16/fp32 关闭，避免与模型 dtype 不一致导致 NaN。"""
+    amp_dtype = training_autocast_dtype(args)
+    return GradScaler(enabled=(amp_dtype == torch.float16))
+
+
+def training_autocast_context(args, device: torch.device):
+    """训练/验证前向用的 autocast 上下文。"""
+    from contextlib import nullcontext
+
+    amp_dtype = training_autocast_dtype(args)
+    if amp_dtype is None or device.type != "cuda":
+        return nullcontext()
+    # torch.cuda.amp.autocast（2.x）使用 dtype=，与 bf16 权重加载一致。
+    return autocast(dtype=amp_dtype)
+
+
+def model_gradients_finite(model) -> bool:
+    """检查当前梯度是否全部为有限值。"""
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        if not torch.isfinite(parameter.grad).all():
+            return False
+    return True
+
+
+def optimizer_step_with_finite_guard(scaler, optimizer, model, log_name=None):
+    """unscale → 检查梯度 → clip → step；非有限梯度则跳过本次更新。"""
+    scaler.unscale_(optimizer)
+    if not model_gradients_finite(model):
+        msg = "WARNING: non-finite gradients; skipping optimizer step."
+        print(msg)
+        if log_name:
+            write_log(log_name, msg)
+        optimizer.zero_grad(set_to_none=True)
+        scaler.update()
+        return False
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+    return True
 
 
 def dual_device_string(preferred_id):
@@ -748,6 +804,20 @@ def build_batch_prompt_tensors(
     )
 
 
+def _stack_fold_cache_rows(
+    table: dict,
+    keys,
+    device: torch.device,
+) -> torch.Tensor:
+    """从 CPU 上的 fold 冻结表按 key 取行，再一次性拷到 GPU（避免整表常驻显存）。"""
+    if not keys:
+        return torch.empty((0,), device=device)
+    rows = [table[key] for key in keys]
+    stacked = torch.stack(rows, dim=0)
+    non_blocking = device.type == "cuda"
+    return stacked.to(device=device, non_blocking=non_blocking)
+
+
 def compute_batch_selector_tensors(
     model,
     embedding_encoder,
@@ -776,10 +846,11 @@ def compute_batch_selector_tensors(
     unique_ids = torch.unique(node_token_ids)
     unique_ids_list = [int(t) for t in unique_ids.detach().cpu().tolist()]
     if fold_cache is not None and fold_cache.node_emb_by_token_id:
-        unique_emb = torch.stack(
-            [fold_cache.node_emb_by_token_id[token_id] for token_id in unique_ids_list],
-            dim=0,
-        ).to(device)
+        unique_emb = _stack_fold_cache_rows(
+            fold_cache.node_emb_by_token_id,
+            unique_ids_list,
+            device,
+        )
     else:
         decode_fn = lambda tid: tokenizer.decode([int(tid)], skip_special_tokens=True)
         unique_emb = embedding_encoder.encode_token_ids(unique_ids_list, decode_fn)
@@ -788,13 +859,16 @@ def compute_batch_selector_tensors(
 
     if item_embs is None:
         if fold_cache is not None and fold_cache.item_emb_by_text:
-            item_embs = torch.stack(
-                [fold_cache.item_emb_by_text[text] for text in item_texts],
-                dim=0,
-            ).to(device)
+            item_embs = _stack_fold_cache_rows(
+                fold_cache.item_emb_by_text,
+                item_texts,
+                device,
+            )
         else:
             item_embs = embedding_encoder.encode_texts(item_texts)
-    if item_embs.device != device:
+            if item_embs.device != device:
+                item_embs = item_embs.to(device)
+    elif item_embs.device != device:
         item_embs = item_embs.to(device)
     id_to_idx = {tid: idx for idx, tid in enumerate(unique_ids_list)}
     flat_node_ids = node_token_ids.reshape(-1)
@@ -882,10 +956,11 @@ def prepare_batch_review_tensors(
 ):
     """只编码一次当前物品，并同时供 selector 与评论 Top-K 检索复用。"""
     if fold_cache is not None and fold_cache.item_emb_by_text:
-        item_embs = torch.stack(
-            [fold_cache.item_emb_by_text[text] for text in item_texts],
-            dim=0,
-        ).to(device)
+        item_embs = _stack_fold_cache_rows(
+            fold_cache.item_emb_by_text,
+            item_texts,
+            device,
+        )
     else:
         item_embs = embedding_encoder.encode_texts(item_texts)
         if item_embs.device != device:
@@ -969,6 +1044,7 @@ def train_epoch(
     model.train()
     loss_log, nll_log, selector_log, feat_log, prefix_feat_log = [], [], [], [], []
     last_batch_idx = -1
+    train_loop_start = time.perf_counter()
     for cuda_device in cuda_devices:
         if cuda_device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(cuda_device)
@@ -1029,7 +1105,7 @@ def train_epoch(
         )
 
         try:
-            with autocast():
+            with training_autocast_context(args, device):
                 base_loss, nll_loss, feat_loss, prefix_feat_loss = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
@@ -1046,6 +1122,15 @@ def train_epoch(
                     **review_tensors,
                 )
                 loss = base_loss + float(args.lambda_selector) * selector_loss
+            if not torch.isfinite(loss):
+                msg = (
+                    f"WARNING: non-finite loss at epoch={epoch} batch_idx={batch_idx}; "
+                    "skipping backward."
+                )
+                print(msg)
+                write_log(log_name, msg)
+                optimizer.zero_grad(set_to_none=True)
+                continue
             loss_log.append(loss.detach())
             nll_log.append(nll_loss.detach())
             selector_log.append(selector_loss.detach())
@@ -1063,11 +1148,7 @@ def train_epoch(
             raise
 
         if (batch_idx + 1) % args.accumulation_steps == 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad(set_to_none=True)
+            optimizer_step_with_finite_guard(scaler, optimizer, model, log_name)
 
         if (batch_idx + 1) % args.show_train_loss_steps == 0:
             msg = (
@@ -1089,12 +1170,27 @@ def train_epoch(
             break
 
     if last_batch_idx >= 0 and (last_batch_idx + 1) % args.accumulation_steps != 0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
+        optimizer_step_with_finite_guard(scaler, optimizer, model, log_name)
     maybe_warn_cuda_memory(cuda_devices, args.memory_warn_gib)
+    if getattr(args, "emit_train_benchmark", False) and last_batch_idx >= 0:
+        peak_by_device = {}
+        for cuda_device in cuda_devices:
+            if cuda_device.type == "cuda":
+                peak_by_device[str(cuda_device)] = (
+                    torch.cuda.max_memory_allocated(cuda_device) / (1024 ** 3)
+                )
+        benchmark_payload = {
+            "train_batches": last_batch_idx + 1,
+            "wall_seconds": time.perf_counter() - train_loop_start,
+            "peak_gib": peak_by_device,
+            "batch_size": args.batch_size,
+            "accumulation_steps": args.accumulation_steps,
+            "gradient_checkpointing": args.gradient_checkpointing,
+            "attn_implementation": args.attn_implementation,
+            "devices": args.devices,
+            "llm_device_map": getattr(args, "llm_device_map", "single"),
+        }
+        print(f"GRAPH_LLM_TRAIN_BENCHMARK {json.dumps(benchmark_payload, ensure_ascii=False)}")
 
 
 def valid_step(
@@ -1167,7 +1263,7 @@ def valid_step(
                 args,
                 device,
             )
-            with autocast():
+            with training_autocast_context(args, device):
                 base_loss, _nll, _feat, _prefix_feat = model.train_step(
                     input_ids,
                     profile_ids=profile_ids,
@@ -1184,7 +1280,8 @@ def valid_step(
                     **review_tensors,
                 )
                 loss = base_loss + float(args.lambda_selector) * selector_loss
-            loss_log.append(loss.item())
+            if torch.isfinite(loss):
+                loss_log.append(loss.item())
     avg_loss = float(np.mean(loss_log)) if loss_log else float("inf")
     print(f"valid Loss: {avg_loss}")
     write_log(log_name, f"valid Loss: {avg_loss}\n")
@@ -1612,6 +1709,9 @@ def _run_split(
         allow_missing=args.allow_missing_profiles,
     )
     cache_root = Path(args.graph_cache_dir)
+    from graph_llm.dataload.graph_build_fast import HistoryTokenCache
+
+    history_token_cache: HistoryTokenCache = {}
     graph_train = GraphCacheManager.build_or_load(
         full_dataset=dataset,
         split_dataset=train_dataset,
@@ -1630,6 +1730,7 @@ def _run_split(
         tail_node_quota=args.tail_node_quota,
         relevance_node_quota=args.relevance_node_quota,
         preference_node_quota=args.preference_node_quota,
+        history_token_cache=history_token_cache,
     )
     graph_valid = GraphCacheManager.build_or_load(
         full_dataset=dataset,
@@ -1649,6 +1750,7 @@ def _run_split(
         tail_node_quota=args.tail_node_quota,
         relevance_node_quota=args.relevance_node_quota,
         preference_node_quota=args.preference_node_quota,
+        history_token_cache=history_token_cache,
     )
     graph_test = GraphCacheManager.build_or_load(
         full_dataset=dataset,
@@ -1668,6 +1770,7 @@ def _run_split(
         tail_node_quota=args.tail_node_quota,
         relevance_node_quota=args.relevance_node_quota,
         preference_node_quota=args.preference_node_quota,
+        history_token_cache=history_token_cache,
     )
 
     train_set = GraphDataset(train_dataset, "train")
@@ -1957,7 +2060,7 @@ def _run_split(
             "lr": args.learning_rate,
         })
     optimizer = AdamW(optimizer_groups)
-    scaler = GradScaler()
+    scaler = create_training_grad_scaler(args)
 
     ckpt_dir = Path(args.ckpt_dir) / args.dataset_name
     log_dir = Path(args.log_dir) / args.dataset_name

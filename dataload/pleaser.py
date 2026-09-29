@@ -14,6 +14,10 @@ PLEASER_DATASET_NAMES: tuple[str, ...] = (
     "Arts",
     "Office",
     "Tools",
+    "Instruments_small",
+    "Arts_small",
+    "Office_small",
+    "Tools_small",
 )
 
 
@@ -133,8 +137,22 @@ def load_pleaser_item_meta(data_dir: Path, name: str) -> dict[str, dict]:
             description = row.get("description_str")
             if description is None:
                 description = ""
+            # 官方解释 encoder 只用 description 列表的第一段，不用拼起来的全文
+            raw_desc = row.get("description")
+            description_first = ""
+            if isinstance(raw_desc, list):
+                for part in raw_desc:
+                    text = str(part or "").strip()
+                    if text:
+                        description_first = text
+                        break
+            elif raw_desc:
+                description_first = str(raw_desc).strip()
+            if not description_first:
+                description_first = str(description)
             meta[asin] = {
                 "title": "" if title is None else str(title),
                 "description": str(description),
+                "description_first": description_first,
             }
     return meta

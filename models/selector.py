@@ -19,24 +19,29 @@ _GRAPH_MAGNET_CPU: dict[tuple[int, float], tuple[torch.Tensor, torch.Tensor]] = 
 
 
 def get_graph_device_tensors(graph: UserTokenGraph, device: torch.device) -> dict:
-    """每个图在每个 device 上只转换一次边与频率张量。"""
+    """边与频率张量只缓存在 CPU；按需 .to(device)，避免每个图在 GPU 上永久占显存。"""
     cache = graph.__dict__.setdefault("_device_tensors", {})
-    key = str(device)
-    if key not in cache:
+    # 清理旧版按 device 字符串缓存的 GPU 张量（长跑会线性涨显存）。
+    for stale_key in list(cache.keys()):
+        if stale_key != "cpu":
+            del cache[stale_key]
+    if "cpu" not in cache:
         edge_weight = None
         if graph.edge_weight.size > 0:
-            edge_weight = torch.tensor(
-                graph.edge_weight,
-                device=device,
-                dtype=torch.float32,
-            )
-        cache[key] = {
-            "counts": torch.tensor(graph.node_counts, device=device, dtype=torch.float32),
-            "doc_freq": torch.tensor(graph.node_doc_freq, device=device, dtype=torch.float32),
-            "edge_index": torch.tensor(graph.edge_index, device=device, dtype=torch.long),
+            edge_weight = torch.tensor(graph.edge_weight, dtype=torch.float32)
+        cache["cpu"] = {
+            "counts": torch.tensor(graph.node_counts, dtype=torch.float32),
+            "doc_freq": torch.tensor(graph.node_doc_freq, dtype=torch.float32),
+            "edge_index": torch.tensor(graph.edge_index, dtype=torch.long),
             "edge_weight": edge_weight,
         }
-    return cache[key]
+    cpu_tensors = cache["cpu"]
+    if device.type == "cpu":
+        return cpu_tensors
+    return {
+        key: value.to(device) if value is not None else None
+        for key, value in cpu_tensors.items()
+    }
 
 
 def get_magnet_norms_for_graph(

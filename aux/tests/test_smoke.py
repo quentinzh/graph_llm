@@ -890,7 +890,7 @@ def test_standalone_metrics_available():
     generated = [["great", "story"]]
     assert bleu_score(references, generated, n_gram=1) > 0.0
     b2 = bleu_score(references, generated, n_gram=2)
-    assert 0.0 <= b2 <= 100.0
+    assert 0.0 <= b2 <= 1.0
     scores = rouge_score(["great movie"], ["great story"])
     assert {"rouge_1", "rouge_2", "rouge_4", "rouge_l"}.issubset(scores)
 
@@ -1041,6 +1041,25 @@ def test_resolve_devices_string_prefers_cuda1():
     with patch("graph_llm.train.trainer.available_cuda_device_ids", return_value=[0]):
         assert resolve_devices_string("default") == "0"
         assert default_preferred_device_id() == 0
+
+
+def test_default_training_batch_microbatch():
+    from graph_llm.config.args import build_arg_parser
+
+    args = build_arg_parser().parse_args([])
+    assert args.batch_size == 4
+    assert args.accumulation_steps == 8
+    assert args.gradient_checkpointing is False
+
+
+def test_bf16_training_grad_scaler_disabled():
+    from graph_llm.config.args import build_arg_parser
+    from graph_llm.train.trainer import create_training_grad_scaler, training_autocast_dtype
+
+    args = build_arg_parser().parse_args(["--torch_dtype", "bfloat16"])
+    assert training_autocast_dtype(args) == torch.bfloat16
+    scaler = create_training_grad_scaler(args)
+    assert scaler.is_enabled() is False
 
 
 def test_build_oom_plans_progressively_reduce_memory():

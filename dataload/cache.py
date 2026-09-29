@@ -5,22 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from tqdm import tqdm
 
 from graph_llm.models.token_graph import (
     ReviewRecord,
     UserTokenGraph,
-    attach_tokenizer_decode,
-    build_sample_token_graph,
-    extract_explanation_tokens,
 )
-from graph_llm.dataload.tail_stats import TailTokenStats, is_content_token
-from graph_llm.aux.prompt_utils import item_meta_from_row
+from graph_llm.dataload.graph_build_fast import HistoryTokenCache, build_split_graphs_fast
+from graph_llm.dataload.tail_stats import TailTokenStats
 
 
 def _cache_version(
@@ -112,6 +107,7 @@ class GraphCacheManager:
         tail_node_quota: int = 256,
         relevance_node_quota: int = 128,
         preference_node_quota: int = 128,
+        history_token_cache: HistoryTokenCache | None = None,
     ) -> GraphCacheManager:
         tail_fingerprint = tail_stats.fingerprint if tail_stats is not None else None
         cache_path = cls.cache_path(
@@ -144,57 +140,22 @@ class GraphCacheManager:
                 meta=payload["meta"],
             )
 
-        attach_tokenizer_decode(tokenizer)
-        content_filter = lambda token_id: is_content_token(tokenizer, token_id, skip_token_ids)
-
-        user_histories: dict[str, list[ReviewRecord]] = defaultdict(list)
-        for row_key, row in history_dataset.iterrows():
-            raw_user = str(row["raw_user"])
-            raw_item = str(row["raw_item"])
-            explanation = row["review_text"] if "review_text" in row else row["template"][2]
-            tokens = tuple(extract_explanation_tokens(tokenizer, explanation, skip_token_ids))
-            user_histories[raw_user].append(
-                ReviewRecord(int(row_key), raw_user, raw_item, tokens),
-            )
-
-        allowed_history_keys: dict[str, set[int]] = defaultdict(set)
-        for row_key, row in history_dataset.iterrows():
-            allowed_history_keys[str(row["raw_user"])].add(int(row_key))
-
-        graphs: dict[tuple[str, int], UserTokenGraph] = {}
-        for local_idx, (_, row) in enumerate(tqdm(
-            split_dataset.iterrows(),
-            total=len(split_dataset),
-            desc=f"build graphs fold={fold} split={split_name}",
-        )):
-            raw_user = str(row["raw_user"])
-            raw_item = str(row["raw_item"])
-            row_key = int(row.name)
-            history = [
-                rec for rec in user_histories.get(raw_user, [])
-                if rec.row_key in allowed_history_keys[raw_user]
-            ]
-            _title, _description, item_text = item_meta_from_row(raw_item, item_meta)
-            target_item_token_ids = {
-                int(token_id)
-                for token_id in tokenizer(item_text, add_special_tokens=False)["input_ids"]
-                if int(token_id) not in skip_token_ids
-            }
-            graph = build_sample_token_graph(
-                history,
-                exclude_row_key=row_key,
-                target_raw_item=raw_item,
-                skip_token_ids=skip_token_ids,
-                max_nodes=max_nodes,
-                min_token_count=min_token_count,
-                tail_stats=tail_stats,
-                target_item_token_ids=target_item_token_ids,
-                content_token_filter=content_filter if tail_stats is not None else None,
-                tail_node_quota=tail_node_quota,
-                relevance_node_quota=relevance_node_quota,
-                preference_node_quota=preference_node_quota,
-            )
-            graphs[(split_name, local_idx)] = graph
+        user_histories, allowed_history_keys, graphs = build_split_graphs_fast(
+            split_dataset=split_dataset,
+            split_name=split_name,
+            fold=fold,
+            history_dataset=history_dataset,
+            tokenizer=tokenizer,
+            skip_token_ids=skip_token_ids,
+            max_nodes=max_nodes,
+            min_token_count=min_token_count,
+            tail_stats=tail_stats,
+            item_meta=item_meta,
+            tail_node_quota=tail_node_quota,
+            relevance_node_quota=relevance_node_quota,
+            preference_node_quota=preference_node_quota,
+            history_token_cache=history_token_cache,
+        )
 
         meta = {
             "dataset_name": dataset_name,

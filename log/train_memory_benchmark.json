@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-09-26T20:58:41.531509Z",
+  "devices": "1",
+  "description": "默认 sdpa, batch_size=4, accumulation_steps=8, gradient_checkpointing=False",
+  "results": [
+    {
+      "name": "default_microbatch",
+      "exit_code": 0,
+      "wall_seconds_total": 81.92761834315024,
+      "benchmark": {
+        "train_batches": 2,
+        "wall_seconds": 1.7939038909971714,
+        "peak_gib": {
+          "cuda:1": 22.540936946868896
+        },
+        "batch_size": 4,
+        "accumulation_steps": 8,
+        "gradient_checkpointing": false,
+        "attn_implementation": "sdpa",
+        "devices": "1",
+        "llm_device_map": "single"
+      },
+      "oom": false,
+      "tail_log": ""
+    }
+  ]
+}

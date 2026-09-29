@@ -171,13 +171,13 @@ def build_arg_parser():
         default="sdpa",
         help="Attention backend; sdpa is faster than eager and usually needs less memory than checkpointing",
     )
-    parser.add_argument("--batch_size", default=8, type=int)
+    parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--eval_batch_size", default=8, type=int)
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--seed", default=5254, type=int)
     parser.add_argument("--epochs", default=3, type=int)
     parser.add_argument("--learning_rate", default=1e-3, type=float)
-    parser.add_argument("--accumulation_steps", default=4, type=int)
+    parser.add_argument("--accumulation_steps", default=8, type=int)
     parser.add_argument("--early_stop_patience", default=2, type=int)
     parser.add_argument("--word", default=40, type=int)
     parser.add_argument("--show_train_loss_steps", default=500, type=int)
@@ -273,11 +273,17 @@ def build_arg_parser():
         dest="gradient_checkpointing",
         action="store_true",
         default=False,
+        help="开启全层 gradient checkpointing 以压低激活显存（默认关闭，使用 micro-batch 4 / accum 8）",
     )
     parser.add_argument(
         "--no_gradient_checkpointing",
         dest="gradient_checkpointing",
         action="store_false",
+    )
+    parser.add_argument(
+        "--emit_train_benchmark",
+        action="store_true",
+        help="训练 smoke 结束时向 stdout 打印 GRAPH_LLM_TRAIN_BENCHMARK JSON（峰值显存与耗时）",
     )
     parser.add_argument("--only_eval", action="store_true")
     parser.add_argument(

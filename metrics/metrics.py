@@ -74,9 +74,10 @@ def compute_bleu(reference_corpus, translation_corpus, max_order=4, smooth=False
 
 
 def bleu_score(references, generated, n_gram=4, smooth=False):
+    """Corpus BLEU，返回 0–1 小数（与 Recall/NDCG 等指标尺度一致）。"""
     formatted_ref = [[ref] for ref in references]
     bleu_s, _, _, _, _, _ = compute_bleu(formatted_ref, generated, n_gram, smooth)
-    return bleu_s * 100
+    return bleu_s
 
 
 def _split_into_words(sentences):
@@ -161,7 +162,8 @@ def rouge(hypotheses, references):
 
 
 def rouge_score(references, generated):
-    return {key: value * 100 for key, value in rouge(generated, references).items()}
+    """ROUGE 汇总，各键为 0–1 小数。"""
+    return rouge(generated, references)
 
 
 def _default_bertscore_device():
